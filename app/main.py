@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="RuoYi AI Service - FastAPI + LangChain 集成服务",
+    description="Megumi AI Servive - FastAPI + LangChain 集成服务",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -73,7 +73,7 @@ app.include_router(
 async def root():
     """根路径."""
     return {
-        "message": "RuoYi AI Service",
+        "message": "Megumi AI Servive",
         "version": settings.APP_VERSION,
         "docs": "/docs"
     }

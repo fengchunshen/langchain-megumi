@@ -1,2 +1,2 @@
-"""RuoYi AI Service - FastAPI Application."""
+"""Megumi AI Servive - FastAPI Application."""
 

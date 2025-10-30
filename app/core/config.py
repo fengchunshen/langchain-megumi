@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     """应用配置类 - 从环境变量加载配置."""
     
     # 应用基础配置
-    APP_NAME: str = "RuoYi AI Service"
+    APP_NAME: str = "Megumi AI Servive"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     
     # DeepSeek API 配置
     DEEPSEEK_API_KEY: Optional[str] = None
-    DEEPSEEK_API_URL: Optional[str] = "https://api.deepseek.com/v1/chat/completions"
+    DEEPSEEK_API_URL: Optional[str] = None
     DEEPSEEK_SSL_VERIFY: bool = True
     DEEPSEEK_CA_BUNDLE: Optional[str] = None
     
