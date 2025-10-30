@@ -1,0 +1,299 @@
+# RuoYi AI Service - Cursor Rules
+
+## 项目概述
+
+这是一个基于 FastAPI + LangChain 的 AI 服务项目，用于与 RuoYi 后端集成。项目提供绘图、OCR、FastGPT 对话和智能体任务编排等功能。
+
+## 技术栈
+
+- **FastAPI**: 高性能 Web API 框架，使用异步编程
+- **LangChain**: AI 任务编排，使用 LCEL (LangChain Expression Language) 和 LangGraph
+- **Pydantic v2**: 数据模型验证和设置管理
+- **httpx**: 异步 HTTP 客户端
+- **Python 3.8+**: 使用类型提示和异步特性
+
+## 代码风格
+
+### Python 代码规范
+
+- **遵循 PEP 8**: 使用标准的 Python 代码风格
+- **类型提示**: 所有函数和类方法必须包含类型提示
+- **文档字符串**: 使用中文编写 docstring，遵循 Google 风格
+- **导入顺序**: 标准库 → 第三方库 → 本地模块，每组之间空一行
+- **命名规范**:
+  - 类名: `PascalCase` (如 `OrchestrationService`)
+  - 函数/变量名: `snake_case` (如 `orchestrate_task`)
+  - 常量: `UPPER_SNAKE_CASE` (如 `API_V1_PREFIX`)
+  - 私有方法: 以单个下划线开头 (如 `_build_graph`)
+
+### 文件结构规范
+
+```
+app/
+├── main.py              # FastAPI 应用入口
+├── apis/                # API 路由层
+│   ├── deps.py          # FastAPI 依赖项
+│   └── v1/              # API v1 版本
+│       └── endpoint_*.py
+├── core/                # 核心配置和工具
+│   ├── config.py        # 配置管理（Pydantic Settings）
+│   └── security.py      # 安全相关（认证、加密等）
+├── models/              # Pydantic 数据模型
+│   └── *.py             # 请求/响应模型
+├── services/            # 业务逻辑层
+│   └── *_service.py     # 服务类实现
+└── chains/              # LangChain 链和工具
+    └── *.py             # LangChain 链定义
+```
+
+## FastAPI 最佳实践
+
+### API 端点编写
+
+- **路由定义**: 使用 `APIRouter` 组织路由，在 `main.py` 中统一注册
+- **响应模型**: 使用 `response_model` 参数指定响应模型
+- **依赖注入**: 使用 `Depends()` 进行依赖注入，如 API 密钥验证
+- **异常处理**: 使用 `HTTPException` 抛出 HTTP 异常，配合 try-except 捕获业务异常
+- **异步函数**: API 端点函数使用 `async def`，内部调用异步服务
+- **文档字符串**: 每个端点必须包含中文 docstring，说明功能、参数和返回值
+
+示例：
+```python
+@router.post("/endpoint", response_model=ResponseModel)
+async def endpoint_function(
+    request: RequestModel,
+    api_key: str = Depends(get_api_key)
+) -> ResponseModel:
+    """
+    端点功能描述.
+    
+    Args:
+        request: 请求模型
+        api_key: API 密钥（通过依赖注入）
+        
+    Returns:
+        ResponseModel: 响应模型
+        
+    Raises:
+        HTTPException: 当操作失败时
+    """
+    try:
+        return await service.method(request)
+    except Exception as e:
+        logger.error(f"操作失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+```
+
+### 路由注册
+
+- 在 `main.py` 中使用 `app.include_router()` 注册路由
+- 使用 `prefix` 设置路由前缀
+- 使用 `tags` 为路由分组，便于 API 文档组织
+
+## Pydantic 模型规范
+
+### 模型定义
+
+- **继承 BaseModel**: 所有数据模型继承自 `pydantic.BaseModel`
+- **字段验证**: 使用 `Field()` 进行字段验证和描述
+- **类型提示**: 使用 `Optional`、`List`、`Dict` 等类型提示
+- **枚举类型**: 使用 `Enum` 定义枚举值
+- **默认值**: 合理设置默认值，使用 `...` 表示必填字段
+
+示例：
+```python
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any
+from enum import Enum
+
+class TaskType(str, Enum):
+    """任务类型枚举."""
+    TEXT_GENERATION = "text_generation"
+    QNA = "qna"
+
+class RequestModel(BaseModel):
+    """请求模型."""
+    query: str = Field(..., description="用户查询", min_length=1, max_length=5000)
+    task_type: Optional[TaskType] = Field(default=TaskType.QNA, description="任务类型")
+    context: Optional[Dict[str, Any]] = Field(default=None, description="上下文信息")
+```
+
+### 配置管理
+
+- 使用 `pydantic_settings.BaseSettings` 管理配置
+- 从环境变量加载配置，支持 `.env` 文件
+- 配置类命名为 `Settings`，实例命名为 `settings`
+- 所有配置项必须有类型提示和默认值（或使用 `Optional`）
+
+## LangChain/LangGraph 规范
+
+### LangChain 链
+
+- 使用 LCEL (LangChain Expression Language) 定义链
+- 链文件放在 `app/chains/` 目录
+- 链应该是可复用的，通过参数配置不同的行为
+
+### LangGraph 状态图
+
+- 使用 `langgraph.graph.StateGraph` 构建状态图
+- 状态使用 `TypedDict` 定义
+- 节点函数命名使用 `_` 前缀（私有方法）
+- 图构建逻辑放在 `_build_graph()` 方法中
+- 使用 `compile()` 编译图
+
+示例：
+```python
+from langgraph.graph import StateGraph, END
+from typing import TypedDict
+
+class AgentState(TypedDict):
+    query: str
+    answer: str
+
+workflow = StateGraph(AgentState)
+workflow.add_node("node_name", node_function)
+workflow.set_entry_point("node_name")
+workflow.add_edge("node_name", END)
+graph = workflow.compile()
+```
+
+## 服务层规范
+
+### 服务类设计
+
+- 每个服务一个类，类名以 `Service` 结尾
+- 服务类使用单例模式，在模块底部创建全局实例
+- 私有方法使用 `_` 前缀
+- 公共方法应该是异步的（`async def`）
+- 方法应该包含完整的类型提示和文档字符串
+
+示例：
+```python
+class MyService:
+    """服务类描述."""
+    
+    def __init__(self):
+        """初始化服务."""
+        self.graph = self._build_graph()
+    
+    def _build_graph(self) -> StateGraph:
+        """构建图（私有方法）."""
+        # ...
+    
+    async def process(self, request: RequestModel) -> ResponseModel:
+        """
+        处理请求.
+        
+        Args:
+            request: 请求模型
+            
+        Returns:
+            ResponseModel: 响应模型
+        """
+        # ...
+
+# 创建全局服务实例
+my_service = MyService()
+```
+
+## 错误处理和日志
+
+### 异常处理
+
+- **API 层**: 捕获异常并转换为 `HTTPException`
+- **服务层**: 抛出具体的业务异常，让 API 层处理
+- **日志记录**: 使用 `logging` 模块记录错误和重要信息
+- **错误消息**: 使用中文错误消息，便于调试
+
+### 日志规范
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+# 记录不同级别的日志
+logger.debug("调试信息")
+logger.info("一般信息")
+logger.warning("警告信息")
+logger.error(f"错误信息: {e}")
+logger.exception("异常信息（包含堆栈）")
+```
+
+## 异步编程规范
+
+- **API 端点**: 必须使用 `async def`
+- **HTTP 请求**: 使用 `httpx.AsyncClient` 进行异步 HTTP 请求
+- **LangChain 调用**: 使用 `ainvoke()` 或 `astream()` 异步方法
+- **数据库操作**: 如果使用数据库，使用异步 ORM（如 SQLAlchemy async）
+- **避免阻塞**: 不要在异步函数中使用同步阻塞操作
+
+## 配置和环境变量
+
+- 所有配置通过 `app/core/config.py` 的 `Settings` 类管理
+- 敏感信息（API Keys）从环境变量读取，不硬编码
+- 提供 `.env.example` 文件作为配置模板
+- 使用 `python-dotenv` 加载 `.env` 文件
+
+## 测试规范
+
+- 测试文件命名: `test_*.py`
+- 使用 `pytest` 框架编写测试
+- API 端点测试使用 `httpx.AsyncClient` 和 `TestClient`
+- 服务层测试使用 mock 对象模拟外部依赖
+
+## 文档规范
+
+- **代码注释**: 使用中文注释，解释复杂逻辑
+- **Docstring**: 所有公共函数和类必须有中文 docstring
+- **README**: 保持 README.md 更新，包含项目说明、安装步骤和 API 文档链接
+- **类型提示**: 作为代码文档的一部分，帮助理解代码
+
+## 其他规范
+
+### 导入顺序
+
+```python
+# 1. 标准库
+import logging
+from typing import Optional, List, Dict, Any
+
+# 2. 第三方库
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field
+
+# 3. 本地模块
+from app.core.config import settings
+from app.models.agent import AgentRequest
+```
+
+### 字符串格式化
+
+- 优先使用 f-string: `f"用户 {user_id} 操作失败"`
+- 日志消息使用 f-string 或格式化字符串
+
+### 常量定义
+
+- 魔法数字和字符串应该定义为常量
+- 常量定义在相关模块顶部或单独的配置文件中
+
+## 代码审查清单
+
+编写代码时，确保：
+- [ ] 所有函数都有类型提示
+- [ ] 所有公共函数和类都有中文 docstring
+- [ ] API 端点使用 `response_model` 指定响应模型
+- [ ] 异常处理完善，有适当的日志记录
+- [ ] 异步函数正确使用 `async/await`
+- [ ] 配置通过 `Settings` 类管理，不硬编码
+- [ ] 导入语句按顺序组织（标准库 → 第三方 → 本地）
+- [ ] 代码遵循项目命名规范
+
+## 注意事项
+
+- **不要**在生产环境中使用 `allow_origins=["*"]`，应该限制具体域名
+- **不要**在代码中硬编码 API Keys 或其他敏感信息
+- **不要**在异步函数中使用同步阻塞操作
+- **确保**所有 API 端点都有适当的错误处理和日志记录
+- **确保**使用类型提示提高代码可维护性
+
