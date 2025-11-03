@@ -29,10 +29,10 @@ class Settings(BaseSettings):
     DRAWING_API_KEY: Optional[str] = None
     DRAWING_API_URL: Optional[str] = None
     
-    # OCR 服务配置（例如：百度 OCR, 腾讯 OCR）
-    OCR_API_KEY: Optional[str] = None
-    OCR_SECRET_KEY: Optional[str] = None
-    OCR_API_URL: Optional[str] = None
+    # DashScope (阿里云通义千问) OCR 配置
+    DASHSCOPE_API_KEY: Optional[str] = None
+    DASHSCOPE_BASE_URL: Optional[str] = None
+    DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
     
     # DeepSeek API 配置
     DEEPSEEK_API_KEY: Optional[str] = None

@@ -189,6 +189,37 @@ fetch('http://localhost:8000/api/v1/analysis/analyze-node', {
 3. 父节点和兄弟节点信息有助于生成更精准的标签
 4. 接口使用异步处理，建议设置合适的超时时间
 
+## OCR 配置说明
+
+### 环境变量配置
+
+项目使用阿里云 DashScope（通义千问）OCR 服务。在 `.env` 文件中配置以下参数：
+
+```bash
+# DashScope (阿里云通义千问) OCR 配置
+DASHSCOPE_API_KEY=sk-your_dashscope_api_key_here          # DashScope API 密钥（必填）
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1  # DashScope API 地址（必填）
+DASHSCOPE_OCR_MODEL=qwen-vl-ocr-latest                    # OCR 模型名称（可选，默认：qwen-vl-ocr-latest）
+```
+
+### 配置示例
+
+```bash
+DASHSCOPE_API_KEY=sk-0b7d3b1046744800bb1c989ee16ba576
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_OCR_MODEL=qwen-vl-ocr-latest
+```
+
+### 配置验证
+
+配置完成后，重启服务，OCR 服务会自动从环境变量加载配置。如果配置不完整，调用 OCR API 时会返回错误。
+
+### 获取 DashScope API Key
+
+1. 访问 [阿里云 DashScope 控制台](https://dashscope.console.aliyun.com/)
+2. 创建 API Key
+3. 将 API Key 配置到 `.env` 文件中
+
 ## 项目结构
 
 ```
