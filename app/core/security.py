@@ -21,11 +21,12 @@ async def verify_api_key(api_key: Optional[str] = Security(API_KEY_HEADER)) -> s
     Raises:
         HTTPException: 如果 API Key 无效或缺失
     """
-    if not settings.RUOYI_API_KEY:
-        # 如果未配置 API Key，则跳过验证（开发环境）
+    # 如果未配置 API Key 或使用占位符值，则跳过验证（开发环境）
+    configured_key = settings.RUOYI_API_KEY
+    if not configured_key or configured_key.strip() == "" or configured_key.startswith("your_") or "here" in configured_key.lower():
         return api_key or ""
     
-    if not api_key or api_key != settings.RUOYI_API_KEY:
+    if not api_key or api_key != configured_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效的 API Key",

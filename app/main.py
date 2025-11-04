@@ -7,13 +7,14 @@ from app.apis.v1 import (
     endpoint_ocr,
     endpoint_fastgpt,
     endpoint_agent,
-    endpoint_analysis
+    endpoint_analysis,
+    endpoint_deepsearch
 )
 import logging
 
 # 配置日志
 logging.basicConfig(
-    level=logging.INFO if settings.DEBUG else logging.WARNING,
+    level=logging.INFO,  # 始终使用 INFO 级别，以便记录 API 请求信息
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
@@ -68,6 +69,12 @@ app.include_router(
     tags=["AI分析"]
 )
 
+app.include_router(
+    endpoint_deepsearch.router,
+    prefix=f"{settings.API_V1_PREFIX}/deepsearch",
+    tags=["DeepSearch"]
+)
+
 
 @app.get("/")
 async def root():
@@ -91,6 +98,8 @@ if __name__ == "__main__":
         "app.main:app",
         host=settings.HOST,
         port=settings.PORT,
-        reload=settings.DEBUG
+        reload=settings.DEBUG,
+        timeout_keep_alive=600,  # 保持连接超时时间（秒），用于长时间任务
+        timeout_graceful_shutdown=600  # 优雅关闭超时时间（秒）
     )
 

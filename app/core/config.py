@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: Optional[str] = None
     DASHSCOPE_BASE_URL: Optional[str] = None
     DASHSCOPE_OCR_MODEL: str = "qwen-vl-ocr-latest"
+    DASHSCOPE_CHAT_MODEL: str = "qwen3-max"
     
     # DeepSeek API 配置
     DEEPSEEK_API_KEY: Optional[str] = None
@@ -40,12 +41,21 @@ class Settings(BaseSettings):
     DEEPSEEK_SSL_VERIFY: bool = True
     DEEPSEEK_CA_BUNDLE: Optional[str] = None
     
+    # 博查搜索 API 配置
+    BOCHA_API_KEY: Optional[str] = None
+    
+    # Gemini API 配置
+    GEMINI_API_URL: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-2.5-pro"  # Gemini 模型名称
+    
     # RuoYi 后端认证配置
     RUOYI_API_KEY: Optional[str] = None  # 用于验证来自 RuoYi 的请求
     
     # 其他配置
     TIMEOUT: int = 30  # 请求超时时间（秒）
     MAX_RETRIES: int = 3  # 最大重试次数
+    API_TIMEOUT: int = 600  # API 请求超时时间（秒），默认10分钟，用于 DeepSearch 等长时间任务
     
     model_config = {
         "env_file": ".env",

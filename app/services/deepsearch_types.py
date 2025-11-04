@@ -1,0 +1,85 @@
+from typing import List, Dict
+from pydantic import BaseModel, Field
+
+
+class SearchQueryList(BaseModel):
+    query: List[str] = Field(description="A list of search queries to be used for web research.")
+    rationale: str = Field(description="A brief explanation of why these queries are relevant to the research topic.")
+
+
+class Reflection(BaseModel):
+    is_sufficient: bool = Field(description="Whether the provided summaries are sufficient to answer the user's question.")
+    knowledge_gap: str = Field(description="A description of what information is missing or needs clarification.")
+    follow_up_queries: List[str] = Field(description="A list of follow-up queries to address the knowledge gap.")
+
+
+class ContentQualityAssessment(BaseModel):
+    """内容质量和可靠性评估。"""
+    quality_score: float = Field(
+        description="整体质量评分，范围 0.0 到 1.0", ge=0.0, le=1.0
+    )
+    reliability_assessment: str = Field(
+        description="来源可靠性和可信度评估"
+    )
+    content_gaps: List[str] = Field(
+        description="内容中识别出的空白或缺失信息"
+    )
+    improvement_suggestions: List[str] = Field(
+        description="改进内容质量的建议"
+    )
+
+
+class FactVerification(BaseModel):
+    """事实验证结果。"""
+    verified_facts_text: List[str] = Field(
+        description="已验证的事实列表（文本描述）"
+    )
+    verified_facts_sources: List[str] = Field(
+        description="已验证事实对应的来源列表（与verified_facts_text顺序一一对应）"
+    )
+    disputed_claims_text: List[str] = Field(
+        description="有争议的声明列表（文本描述）"
+    )
+    disputed_claims_reasons: List[str] = Field(
+        description="争议原因列表（与disputed_claims_text顺序一一对应）"
+    )
+    verification_sources: List[str] = Field(
+        description="用于事实验证的来源"
+    )
+    confidence_score: float = Field(
+        description="事实验证的整体置信度", ge=0.0, le=1.0
+    )
+
+
+class RelevanceAssessment(BaseModel):
+    """内容与研究主题的相关性评估。"""
+    relevance_score: float = Field(
+        description="相关性评分，范围 0.0 到 1.0", ge=0.0, le=1.0
+    )
+    key_topics_covered: List[str] = Field(
+        description="内容中充分覆盖的关键主题"
+    )
+    missing_topics: List[str] = Field(
+        description="缺失或覆盖不足的重要主题"
+    )
+    content_alignment: str = Field(
+        description="内容与研究目标的对齐情况评估"
+    )
+
+
+class SummaryOptimization(BaseModel):
+    """优化的摘要及增强洞察。"""
+    optimized_summary: str = Field(
+        description="研究发现的增强和优化摘要"
+    )
+    key_insights: List[str] = Field(
+        description="从研究中提取的关键洞察"
+    )
+    actionable_items: List[str] = Field(
+        description="基于研究发现的可行项目或建议"
+    )
+    confidence_level: str = Field(
+        description="摘要和洞察的置信度等级"
+    )
+
+

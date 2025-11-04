@@ -72,6 +72,7 @@ docker run -d \
 - `POST /api/v1/analysis/analyze-solution` - 分析解决方案并生成相关标签
 - `POST /api/v1/analysis/analyze-company-tags` - 分析企业经营范围并生成相关标签
 - `GET /api/v1/analysis/health` - AI分析服务健康检查
+- `POST /api/v1/deepsearch/run` - DeepSearch 深度研究流程
 
 ## /analyze-node 接口使用说明
 
@@ -189,6 +190,127 @@ fetch('http://localhost:8000/api/v1/analysis/analyze-node', {
 3. 父节点和兄弟节点信息有助于生成更精准的标签
 4. 接口使用异步处理，建议设置合适的超时时间
 
+## /deepsearch/run 接口使用说明
+
+### 接口地址
+```
+POST /api/v1/deepsearch/run
+```
+
+### 接口说明
+
+DeepSearch 是一个基于 Gemini 的深度研究流程，能够自动执行多轮搜索、分析和总结，返回带引用的研究结果。
+
+### 请求参数
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| query | string | 是 | 研究主题/问题，长度1-8000字符 |
+| initial_search_query_count | int | 否 | 初始搜索 Query 数量，范围1-10，不传则使用默认配置 |
+| max_research_loops | int | 否 | 最大研究循环次数，范围1-10，不传则使用默认配置 |
+| reasoning_model | string | 否 | 用于反思/总结的模型覆盖，不传则使用默认配置 |
+
+### 请求示例
+
+#### cURL
+```bash
+curl -X POST "http://localhost:8000/api/v1/deepsearch/run" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{
+    "query": "TOPCon电池技术的最新发展及应用前景",
+    "initial_search_query_count": 3,
+    "max_research_loops": 5
+  }'
+```
+
+#### Python (requests)
+```python
+import requests
+
+url = "http://localhost:8000/api/v1/deepsearch/run"
+headers = {
+    "Content-Type": "application/json",
+    "X-API-Key": "your_api_key"
+}
+payload = {
+    "query": "TOPCon电池技术的最新发展及应用前景",
+    "initial_search_query_count": 3,
+    "max_research_loops": 5
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())
+```
+
+#### JavaScript (fetch)
+```javascript
+fetch('http://localhost:8000/api/v1/deepsearch/run', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-API-Key': 'your_api_key'
+  },
+  body: JSON.stringify({
+    query: 'TOPCon电池技术的最新发展及应用前景',
+    initial_search_query_count: 3,
+    max_research_loops: 5
+  })
+})
+.then(response => response.json())
+.then(data => console.log(data));
+```
+
+### 响应示例
+
+```json
+{
+  "success": true,
+  "answer": "TOPCon（隧穿氧化层钝化接触）电池技术是当前光伏行业的重要发展方向之一...\n[1][2]",
+  "sources": [
+    {
+      "label": "TOPCon技术概述",
+      "short_url": "[1]",
+      "value": "https://example.com/article1"
+    },
+    {
+      "label": "TOPCon市场分析",
+      "short_url": "[2]",
+      "value": "https://example.com/article2"
+    }
+  ],
+  "metadata": {
+    "research_loop_count": 3,
+    "number_of_queries": 8
+  },
+  "message": null
+}
+```
+
+### 响应字段说明
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| success | boolean | 是否成功 |
+| answer | string | 最终带引用的研究结果，正文中包含引用标记如 [1][2] |
+| sources | array | 被使用的数据源列表 |
+| sources[].label | string | 数据源标题/标签 |
+| sources[].short_url | string | 短链引用标记（如 [1]），用于正文中引用 |
+| sources[].value | string | 原始 URL |
+| metadata | object | 附加元数据 |
+| metadata.research_loop_count | int | 实际执行的研究循环次数 |
+| metadata.number_of_queries | int | 搜索查询总数 |
+| message | string | 附加消息（如果有） |
+
+### 注意事项
+
+1. 确保已配置 `GEMINI_API_KEY` 和 `GEMINI_API_URL` 环境变量
+2. 确保已配置 `BOCHA_API_KEY` 环境变量（用于搜索功能）
+3. 需要 API Key 认证，请求头中需包含 `X-API-Key`
+4. 接口执行时间较长（可能几分钟），建议设置较长的超时时间（建议600秒）
+5. query 字段应明确描述研究主题，有助于生成更精准的搜索结果
+6. initial_search_query_count 和 max_research_loops 参数用于控制搜索深度，可根据需求调整
+
 ## OCR 配置说明
 
 ### 环境变量配置
@@ -233,7 +355,8 @@ jingboAI_python/
 │   │       ├── endpoint_ocr.py
 │   │       ├── endpoint_fastgpt.py
 │   │       ├── endpoint_agent.py
-│   │       └── endpoint_analysis.py
+│   │       ├── endpoint_analysis.py
+│   │       └── endpoint_deepsearch.py
 │   ├── core/                  # 核心配置
 │   │   ├── config.py          # 配置管理
 │   │   └── security.py        # 安全相关
