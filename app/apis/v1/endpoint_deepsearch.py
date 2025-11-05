@@ -1,7 +1,13 @@
 """DeepSearch 研究流程 API 端点。"""
 from fastapi import APIRouter, HTTPException, Depends
-from app.apis.deps import get_api_key
-from app.models.deepsearch import DeepSearchRequest, DeepSearchResponse
+from fastapi.responses import StreamingResponse
+from datetime import datetime
+from app.models.deepsearch import (
+    DeepSearchRequest, 
+    DeepSearchResponse,
+    DeepSearchEvent,
+    DeepSearchEventType
+)
 from app.services.deepsearch_service import deepsearch_service
 import logging
 
@@ -15,7 +21,6 @@ router = APIRouter()
 @router.post("/run", response_model=DeepSearchResponse)
 async def run_deepsearch(
     request: DeepSearchRequest,
-    api_key: str = Depends(get_api_key),
 ) -> DeepSearchResponse:
     """
     触发基于 Gemini 的 DeepSearch 流程。
@@ -23,6 +28,12 @@ async def run_deepsearch(
     - 读取 `.env` 中的 `GEMINI_API_KEY`
     - 使用 `agent.graph` 的图流执行 DeepSearch
     - 返回带引用的最终回答和使用到的数据源
+    
+    Args:
+        request: DeepSearch请求
+        
+    Returns:
+        DeepSearchResponse: DeepSearch响应结果
     """
     logger.info(f"=== DeepSearch 请求开始 ===")
     logger.info(f"查询内容: {request.query[:200]}...")  # 只记录前200个字符
@@ -34,12 +45,71 @@ async def run_deepsearch(
         result = await deepsearch_service.run(request)
         logger.info(f"=== DeepSearch 请求成功完成 ===")
         logger.info(f"答案长度: {len(result.answer)} 字符")
-        logger.info(f"数据源数量: {len(result.sources)}")
+        logger.info(f"被引用数据源数量: {len(result.sources)}")
+        logger.info(f"所有搜索到的资源数量: {len(result.all_sources)}")
         logger.info(f"研究循环次数: {result.metadata.get('research_loop_count', 'N/A')}")
         logger.info(f"搜索查询总数: {result.metadata.get('number_of_queries', 'N/A')}")
         return result
     except Exception as e:
         logger.error(f"DeepSearch 执行失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"DeepSearch 执行失败: {str(e)}")
+
+
+@router.post("/run/stream")
+async def run_deepsearch_stream(
+    request: DeepSearchRequest,
+):
+    """
+    DeepSearch 流式接口（SSE）.
+    
+    实时推送研究过程中的各个阶段和结果。
+    
+    响应类型：Server-Sent Events (text/event-stream)
+    
+    事件格式：
+    ```
+    event: <事件类型>
+    data: <JSON数据>
+    ```
+    
+    Args:
+        request: DeepSearch请求
+        
+    Returns:
+        StreamingResponse: SSE流式响应
+    """
+    logger.info(f"=== DeepSearch 流式请求开始 ===")
+    logger.info(f"查询内容: {request.query[:200]}...")
+    logger.info(f"报告格式: {request.report_format}")
+    
+    async def event_generator():
+        """事件生成器."""
+        try:
+            async for event in deepsearch_service.run_stream(request):
+                # SSE 格式
+                yield f"event: {event.event_type}\n"
+                yield f"data: {event.model_dump_json()}\n\n"
+        except Exception as e:
+            logger.error(f"流式执行失败: {e}", exc_info=True)
+            # 发送错误事件
+            error_event = DeepSearchEvent(
+                event_type=DeepSearchEventType.ERROR,
+                timestamp=datetime.now().isoformat(),
+                sequence_number=9999,
+                data={"error": str(e)},
+                message=f"执行失败: {str(e)}"
+            )
+            yield f"event: error\n"
+            yield f"data: {error_event.model_dump_json()}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
 
 
