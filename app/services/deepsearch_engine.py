@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict, Callable, TypeVar
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -13,6 +13,8 @@ import requests
 import logging
 
 from app.core.config import settings
+
+T = TypeVar('T')
 from .deepsearch_prompts import (
     get_current_date,
     query_writer_instructions,
@@ -45,6 +47,30 @@ from .deepsearch_types import (
 
 logger = logging.getLogger(__name__)
 
+# 全局变量：跟踪是否已降级到 Qwen3Max
+_gemini_degraded = False
+
+
+def reset_degradation_status():
+    """重置降级状态（用于测试或新请求开始时）."""
+    global _gemini_degraded
+    _gemini_degraded = False
+    logger.info("【降级状态】已重置，将重新尝试 Gemini")
+
+
+def get_qwen_base_url() -> str:
+    """获取 Qwen3Max API base URL."""
+    base_url = settings.DASHSCOPE_BASE_URL
+    if not base_url:
+        raise ValueError("DASHSCOPE_BASE_URL is not set")
+    # 移除末尾的斜杠（如果有）
+    base_url = base_url.rstrip('/')
+    # 确保以 /v1 结尾
+    if not base_url.endswith('/v1'):
+        base_url = f"{base_url}/v1"
+    logger.debug(f"Qwen3Max API base URL: {base_url}")
+    return base_url
+
 
 def get_gemini_base_url() -> str:
     """获取 Gemini API base URL，确保以 /v1 结尾"""
@@ -64,12 +90,167 @@ if not settings.GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is not set")
 
 
+def create_llm_with_fallback(
+    model: str,
+    temperature: float,
+    use_gemini: bool = True,
+    max_retries: int = 2
+) -> ChatOpenAI:
+    """
+    创建 LLM 实例，支持 Gemini 和 Qwen3Max 切换.
+    
+    Args:
+        model: 模型名称
+        temperature: 温度参数
+        use_gemini: 是否优先使用 Gemini（True）或 Qwen3Max（False）
+        max_retries: 最大重试次数
+        
+    Returns:
+        ChatOpenAI: LLM 实例
+    """
+    if use_gemini:
+        base_url = get_gemini_base_url()
+        api_key = settings.GEMINI_API_KEY
+        logger.debug(f"创建 Gemini LLM 实例: {model}")
+    else:
+        base_url = get_qwen_base_url()
+        api_key = settings.DASHSCOPE_API_KEY
+        if not api_key:
+            raise ValueError("DASHSCOPE_API_KEY is not set")
+        logger.debug(f"创建 Qwen3Max LLM 实例: {model}")
+    
+    return ChatOpenAI(
+        model=model,
+        temperature=temperature,
+        max_retries=max_retries,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=settings.API_TIMEOUT,
+    )
+
+
+def invoke_llm_with_fallback(
+    invoke_func: Callable[[ChatOpenAI], T],
+    node_name: str,
+    gemini_model: str,
+    temperature: float = 0.5,
+    qwen_model: str = None,
+    structured_output_type: Any = None,
+    **llm_kwargs
+) -> T:
+    """
+    调用 LLM，支持 Gemini 失败后自动切换到 Qwen3Max.
+    
+    如果已经降级到 Qwen3Max，直接使用 Qwen3Max，不再尝试 Gemini。
+    否则先尝试使用 Gemini（重试2次），如果失败则切换到 Qwen3Max，并设置全局降级标志。
+    
+    Args:
+        invoke_func: 调用函数，接受一个参数（llm 实例）并返回结果
+        node_name: 节点名称（用于日志）
+        gemini_model: Gemini 模型名称
+        temperature: 温度参数
+        qwen_model: Qwen3Max 模型名称（默认使用配置中的 DASHSCOPE_CHAT_MODEL）
+        structured_output_type: 结构化输出类型（如果提供，会自动调用 with_structured_output）
+        **llm_kwargs: 传递给 ChatOpenAI 的其他参数
+        
+    Returns:
+        调用结果
+        
+    Raises:
+        Exception: 如果两种模型都失败，抛出最后一个异常
+    """
+    global _gemini_degraded
+    
+    if qwen_model is None:
+        qwen_model = settings.DASHSCOPE_CHAT_MODEL
+    
+    # 如果已经降级，直接使用 Qwen3Max
+    if _gemini_degraded:
+        logger.info(f"【节点: {node_name}】已降级，直接使用 Qwen3Max ({qwen_model})...")
+        try:
+            llm = create_llm_with_fallback(
+                model=qwen_model,
+                temperature=temperature,
+                use_gemini=False,
+                max_retries=2
+            )
+            
+            # 如果指定了结构化输出类型，使用 with_structured_output
+            if structured_output_type is not None:
+                llm = llm.with_structured_output(structured_output_type)
+            
+            result = invoke_func(llm)
+            logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
+            return result
+        except Exception as e:
+            logger.error(f"【节点: {node_name}】Qwen3Max 调用失败: {str(e)}", exc_info=True)
+            raise e
+    
+    # 尝试使用 Gemini（重试2次）
+    last_error = None
+    for attempt in range(3):  # 第一次 + 2次重试 = 总共3次尝试
+        try:
+            if attempt == 0:
+                logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
+            else:
+                logger.warning(f"【节点: {node_name}】Gemini 第 {attempt} 次重试...")
+            
+            llm = create_llm_with_fallback(
+                model=gemini_model,
+                temperature=temperature,
+                use_gemini=True,
+                max_retries=0  # 在包装函数中手动处理重试
+            )
+            
+            # 如果指定了结构化输出类型，使用 with_structured_output
+            if structured_output_type is not None:
+                llm = llm.with_structured_output(structured_output_type)
+            
+            result = invoke_func(llm)
+            logger.info(f"【节点: {node_name}】Gemini 调用成功")
+            return result
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/3): {str(e)}")
+            if attempt < 2:  # 还有重试机会
+                continue
+            else:
+                # 所有重试都失败，切换到 Qwen3Max 并设置降级标志
+                logger.warning(f"【节点: {node_name}】Gemini 重试2次后仍失败，切换到 Qwen3Max ({qwen_model})...")
+                logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
+                _gemini_degraded = True
+                break
+    
+    # 切换到 Qwen3Max
+    try:
+        llm = create_llm_with_fallback(
+            model=qwen_model,
+            temperature=temperature,
+            use_gemini=False,
+            max_retries=2
+        )
+        
+        # 如果指定了结构化输出类型，使用 with_structured_output
+        if structured_output_type is not None:
+            llm = llm.with_structured_output(structured_output_type)
+        
+        result = invoke_func(llm)
+        logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
+        return result
+    except Exception as e:
+        logger.error(f"【节点: {node_name}】Qwen3Max 调用也失败: {str(e)}", exc_info=True)
+        # 如果 Qwen3Max 也失败，抛出最后一个异常
+        raise e
+
+
 class OverallState(TypedDict, total=False):
     messages: Annotated[List, add_messages]
     research_plan: Optional[ResearchPlan]
     search_query: Annotated[List, operator.add]
     web_research_result: Annotated[List, operator.add]
     sources_gathered: Annotated[List, operator.add]
+    all_sources_gathered: Annotated[List, operator.add]  # 所有搜索到的资源（包括未被引用的）
     initial_search_query_count: int
     max_research_loops: int
     research_loop_count: int
@@ -113,17 +294,6 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     logger.info("【节点: generate_research_plan】开始生成研究方案...")
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    gemini_base_url = get_gemini_base_url()
-    
-    llm = ChatOpenAI(
-        model=reasoning_model,
-        temperature=0.5,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
-    )
-    structured_llm = llm.with_structured_output(ResearchPlan)
     
     research_topic = get_research_topic(state["messages"])
     logger.info(f"【节点: generate_research_plan】研究主题: {research_topic[:200]}...")
@@ -134,7 +304,13 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     
     logger.info("【节点: generate_research_plan】调用 LLM 生成方案...")
     try:
-        plan = structured_llm.invoke(formatted_prompt)
+        plan = invoke_llm_with_fallback(
+            invoke_func=lambda llm: llm.invoke(formatted_prompt),
+            node_name="generate_research_plan",
+            gemini_model=reasoning_model,
+            temperature=0.5,
+            structured_output_type=ResearchPlan
+        )
         logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
         logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
         for idx, sub_topic in enumerate(plan.sub_topics, 1):
@@ -156,20 +332,6 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     logger.info(f"【节点: generate_query】使用模型: {reasoning_model}")
-    
-    gemini_base_url = get_gemini_base_url()
-    logger.info(f"【节点: generate_query】Gemini API URL: {gemini_base_url}")
-    logger.info(f"【节点: generate_query】Gemini API Key: {settings.GEMINI_API_KEY[:20]}...")
-
-    llm = ChatOpenAI(
-        model=reasoning_model,
-        temperature=1.0,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
-    )
-    structured_llm = llm.with_structured_output(SearchQueryList)
 
     research_topic = get_research_topic(state["messages"])
     research_plan = state.get("research_plan")
@@ -208,7 +370,13 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     )
     
     logger.info("【节点: generate_query】调用 LLM (基于方案) 生成查询...")
-    result = structured_llm.invoke(formatted_prompt)
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="generate_query",
+        gemini_model=reasoning_model,
+        temperature=1.0,
+        structured_output_type=SearchQueryList
+    )
     
     query_count = len(result.query) if result.query else 0
     logger.info(f"【节点: generate_query】成功生成 {query_count} 个搜索查询")
@@ -334,21 +502,13 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     )
     full_prompt = formatted_prompt + search_context
 
-    gemini_base_url = get_gemini_base_url()
-    logger.info(f"【节点: web_research】Gemini API URL: {gemini_base_url}")
-    logger.info(f"【节点: web_research】Gemini Model: {settings.GEMINI_MODEL}")
-    
-    llm = ChatOpenAI(
-        model=settings.GEMINI_MODEL,
-        temperature=0,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+    logger.info(f"【节点: web_research】调用 LLM API，提示词长度: {len(full_prompt)} 字符")
+    llm_response = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(full_prompt),
+        node_name="web_research",
+        gemini_model=settings.GEMINI_MODEL,
+        temperature=0
     )
-    
-    logger.info(f"【节点: web_research】调用 Gemini API，提示词长度: {len(full_prompt)} 字符")
-    llm_response = llm.invoke(full_prompt)
     logger.info(f"【节点: web_research】LLM 总结完成，响应长度: {len(llm_response.content)} 字符")
     
     # 处理引用和来源
@@ -363,6 +523,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     return {
         "sources_gathered": sources_gathered,
+        "all_sources_gathered": sources_gathered,  # 保存所有搜索到的资源
         "search_query": [search_query],
         "web_research_result": [modified_text],
     }
@@ -387,18 +548,13 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     )
     
     logger.info("【节点: reflection】调用 LLM 进行反思评估...")
-    gemini_base_url = get_gemini_base_url()
-    logger.info(f"【节点: reflection】Gemini API URL: {gemini_base_url}")
-    
-    llm = ChatOpenAI(
-        model=reasoning_model,
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="reflection",
+        gemini_model=reasoning_model,
         temperature=1.0,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+        structured_output_type=Reflection
     )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
 
     logger.info(f"【节点: reflection】=== 信息充足性评估结果 ===")
     logger.info(f"【节点: reflection】  当前循环: 第 {loop_count} 轮")
@@ -473,20 +629,16 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
     )
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    gemini_base_url = get_gemini_base_url()
     
     logger.info(f"【节点: assess_content_quality】使用模型: {reasoning_model}")
     
-    llm = ChatOpenAI(
-        model=reasoning_model,
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="assess_content_quality",
+        gemini_model=reasoning_model,
         temperature=0.3,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+        structured_output_type=ContentQualityAssessment
     )
-    
-    result = llm.with_structured_output(ContentQualityAssessment).invoke(formatted_prompt)
     
     logger.info(f"【节点: assess_content_quality】质量评分: {result.quality_score}")
     logger.info(f"【节点: assess_content_quality】内容空白数量: {len(result.content_gaps)}")
@@ -517,25 +669,24 @@ def verify_facts(state: OverallState, config: RunnableConfig):
     )
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    gemini_base_url = get_gemini_base_url()
     
     logger.info(f"【节点: verify_facts】使用模型: {reasoning_model}")
     
-    llm = ChatOpenAI(
-        model=reasoning_model,
-        temperature=0.1,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
-    )
+    def invoke_with_method(llm: ChatOpenAI):
+        """调用带 method 参数的 structured_output."""
+        structured_llm = llm.with_structured_output(
+            FactVerification,
+            method="json_schema",
+            include_raw=False
+        )
+        return structured_llm.invoke(formatted_prompt)
     
-    # 使用 include_raw=False 和 method 参数确保 Gemini 兼容
-    result = llm.with_structured_output(
-        FactVerification,
-        method="json_schema",
-        include_raw=False
-    ).invoke(formatted_prompt)
+    result = invoke_llm_with_fallback(
+        invoke_func=invoke_with_method,
+        node_name="verify_facts",
+        gemini_model=reasoning_model,
+        temperature=0.1
+    )
     
     logger.info(f"【节点: verify_facts】验证置信度: {result.confidence_score}")
     logger.info(f"【节点: verify_facts】已验证事实数量: {len(result.verified_facts_text)}")
@@ -575,20 +726,16 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
     )
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    gemini_base_url = get_gemini_base_url()
     
     logger.info(f"【节点: assess_relevance】使用模型: {reasoning_model}")
     
-    llm = ChatOpenAI(
-        model=reasoning_model,
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="assess_relevance",
+        gemini_model=reasoning_model,
         temperature=0.2,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+        structured_output_type=RelevanceAssessment
     )
-    
-    result = llm.with_structured_output(RelevanceAssessment).invoke(formatted_prompt)
     
     logger.info(f"【节点: assess_relevance】相关性评分: {result.relevance_score}")
     logger.info(f"【节点: assess_relevance】覆盖关键主题数量: {len(result.key_topics_covered)}")
@@ -623,20 +770,16 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
     )
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    gemini_base_url = get_gemini_base_url()
     
     logger.info(f"【节点: optimize_summary】使用模型: {reasoning_model}")
     
-    llm = ChatOpenAI(
-        model=reasoning_model,
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="optimize_summary",
+        gemini_model=reasoning_model,
         temperature=0.3,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+        structured_output_type=SummaryOptimization
     )
-    
-    result = llm.with_structured_output(SummaryOptimization).invoke(formatted_prompt)
     
     # 计算最终置信度评分
     quality_score = state.get("content_quality", {}).get("quality_score", 0.5)
@@ -752,18 +895,14 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     )
     
     logger.info("【节点: finalize_answer】调用 LLM 生成专业报告...")
-    gemini_base_url = get_gemini_base_url()
     
     # *** 关键：这里不使用 .with_structured_output()，直接生成纯文本报告 ***
-    llm = ChatOpenAI(
-        model=reasoning_model,
-        temperature=0.2,
-        max_retries=2,
-        api_key=settings.GEMINI_API_KEY,
-        base_url=gemini_base_url,
-        timeout=settings.API_TIMEOUT,
+    result = invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        node_name="finalize_answer",
+        gemini_model=reasoning_model,
+        temperature=0.2
     )
-    result = llm.invoke(formatted_prompt)
     final_report = result.content  # 这就是纯 Markdown 报告
     
     logger.info(f"【节点: finalize_answer】LLM 生成完成，报告长度: {len(final_report)} 字符")
