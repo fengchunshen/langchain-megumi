@@ -175,6 +175,7 @@ class DeepSearchService:
                                 DeepSearchEventType.REFLECTION,
                                 ReflectionEventData(
                                     loopCount=node_output.get("research_loop_count", 0),
+                                    is_sufficient=node_output.get("is_sufficient", False),
                                     knowledgeGap=node_output.get("knowledge_gap"),
                                     followUpQueries=node_output.get("follow_up_queries", [])
                                 ).model_dump(),
