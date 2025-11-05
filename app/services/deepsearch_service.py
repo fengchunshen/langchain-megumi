@@ -99,6 +99,9 @@ class DeepSearchService:
             # 构建初始状态
             state = self._build_initial_state(request)
             
+            # 跟踪最终状态是否获取
+            final_state = None
+            
             # 使用 astream 流式执行
             async for chunk in graph.astream(state, config=RunnableConfig()):
                 # 解析每个步骤的输出
@@ -226,12 +229,18 @@ class DeepSearchService:
                     # 最终答案
                     elif node_name == "finalize_answer":
                         yield self._create_progress_event("生成最终报告", 8, 8, 100.0)
+                        
+                        # 从流式执行的最后一个状态中获取最终结果
+                        final_state = node_output
             
-            # 获取最终状态（重新执行以获取完整结果）
-            final_state = await graph.ainvoke(state, config=RunnableConfig())
-            
-            # 生成最终响应
-            response = self._build_response(request, final_state)
+            # 使用流式执行中获取的最终状态构建响应，避免重复执行
+            if final_state:
+                response = self._build_response(request, final_state)
+            else:
+                # 如果流式执行没有到达最终节点，则重新获取最终状态
+                logger.warning("流式执行未完成，使用重新获取的最终状态")
+                final_state = await graph.ainvoke(state, config=RunnableConfig())
+                response = self._build_response(request, final_state)
             
             # 发送完成事件
             yield self._create_event(
