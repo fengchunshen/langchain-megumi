@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 class ResearchPlan(BaseModel):
     """为研究主题制定的结构化研究方案。"""
     research_topic: str = Field(description="重述或优化的核心研究主题")
-    sub_topics: List[str] = Field(description="为回答核心主题需要研究的关键子主题列表 (3-5个)")
+    sub_topics: List[str] = Field(description="关键子主题列表 (3-5个)")
+    research_questions: List[str] = Field(description="每个子主题对应的具体研究问题列表 (每个子主题2-3个问题，用「子主题：问题」格式)")
     rationale: str = Field(description="制定此研究方案的理由")
 
 
@@ -75,18 +76,15 @@ class RelevanceAssessment(BaseModel):
 
 
 class SummaryOptimization(BaseModel):
-    """优化的摘要及增强洞察。"""
-    optimized_summary: str = Field(
-        description="研究发现的增强和优化摘要"
-    )
+    """结构化的关键洞察和建议。"""
     key_insights: List[str] = Field(
-        description="从研究中提取的关键洞察"
+        description="从研究中提取的关键洞察 (5-10个)"
     )
     actionable_items: List[str] = Field(
-        description="基于研究发现的可行项目或建议"
+        description="基于研究发现的可行项目或建议 (3-5个)"
     )
     confidence_level: str = Field(
-        description="摘要和洞察的置信度等级"
+        description="研究的整体置信度等级（高/中/低）"
     )
 
 

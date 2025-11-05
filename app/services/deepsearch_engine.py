@@ -79,7 +79,6 @@ class OverallState(TypedDict, total=False):
     fact_verification: Dict[str, Any]
     relevance_assessment: Dict[str, Any]
     summary_optimization: Dict[str, Any]
-    quality_enhanced_summary: str
     verification_report: str
     final_confidence_score: float
 
@@ -137,6 +136,9 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     try:
         plan = structured_llm.invoke(formatted_prompt)
         logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
+        logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
+        for idx, sub_topic in enumerate(plan.sub_topics, 1):
+            logger.info(f"【节点: generate_research_plan】  子主题 {idx}: {sub_topic}")
         return {"research_plan": plan}
     except Exception as e:
         logger.error(f"【节点: generate_research_plan】生成方案失败: {e}", exc_info=True)
@@ -176,10 +178,23 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     plan_str = "无特定方案，请直接分析研究主题。"
     if research_plan and research_plan.sub_topics:
         logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
-        plan_str = f"主题: {research_plan.research_topic}\n关键子主题:\n"
+        plan_str = f"主题: {research_plan.research_topic}\n\n关键子主题和研究问题:\n"
+        
+        # 按子主题分组研究问题
         for i, sub_topic in enumerate(research_plan.sub_topics, 1):
-            plan_str += f"{i}. {sub_topic}\n"
-        plan_str += f"理由: {research_plan.rationale}"
+            plan_str += f"\n{i}. {sub_topic}\n"
+            plan_str += "   研究问题:\n"
+            # 找出属于当前子主题的研究问题
+            topic_questions = [q for q in research_plan.research_questions if q.startswith(f"{sub_topic}：")]
+            if not topic_questions:
+                # 如果没有严格匹配的，尝试模糊匹配
+                topic_questions = [q for q in research_plan.research_questions if sub_topic in q]
+            for j, question in enumerate(topic_questions, 1):
+                # 移除「子主题：」前缀，只显示问题本身
+                question_text = question.split("：", 1)[-1] if "：" in question else question
+                plan_str += f"   {i}.{j}. {question_text}\n"
+        
+        plan_str += f"\n理由: {research_plan.rationale}"
     else:
         logger.warning("【节点: generate_query】未找到研究方案，将仅基于主题生成查询")
     
@@ -629,19 +644,17 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
     relevance_score = state.get("relevance_assessment", {}).get("relevance_score", 0.5)
     final_confidence = (quality_score + fact_confidence + relevance_score) / 3
     
-    logger.info(f"【节点: optimize_summary】优化摘要长度: {len(result.optimized_summary)} 字符")
     logger.info(f"【节点: optimize_summary】关键洞察数量: {len(result.key_insights)}")
     logger.info(f"【节点: optimize_summary】可行建议数量: {len(result.actionable_items)}")
-    logger.info(f"【节点: optimize_summary】最终置信度: {final_confidence:.3f}")
+    logger.info(f"【节点: optimize_summary】置信度等级: {result.confidence_level}")
+    logger.info(f"【节点: optimize_summary】最终置信度评分: {final_confidence:.3f}")
     
     return {
         "summary_optimization": {
-            "optimized_summary": result.optimized_summary,
             "key_insights": result.key_insights,
             "actionable_items": result.actionable_items,
             "confidence_level": result.confidence_level
         },
-        "quality_enhanced_summary": result.optimized_summary,
         "final_confidence_score": final_confidence
     }
 
@@ -704,38 +717,62 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     sources_gathered = state.get("sources_gathered", [])
     logger.info(f"【节点: finalize_answer】汇总 {len(web_research_results)} 个搜索结果，{len(sources_gathered)} 个数据源")
 
-    # 使用优化后的摘要（如果有），否则使用原始摘要
-    final_summary = state.get("quality_enhanced_summary")
-    if not final_summary:
-        logger.info("【节点: finalize_answer】使用原始摘要")
-        formatted_prompt = answer_instructions.format(
-            current_date=get_current_date(),
-            research_topic=get_research_topic(state["messages"]),
-            summaries="\n---\n\n".join(state["web_research_result"]),
-        )
-        
-        logger.info("【节点: finalize_answer】调用 LLM 生成最终答案...")
-        gemini_base_url = get_gemini_base_url()
-        
-        llm = ChatOpenAI(
-            model=reasoning_model,
-            temperature=0,
-            max_retries=2,
-            api_key=settings.GEMINI_API_KEY,
-            base_url=gemini_base_url,
-            timeout=settings.API_TIMEOUT,
-        )
-        result = llm.invoke(formatted_prompt)
-        final_summary = result.content
-        logger.info(f"【节点: finalize_answer】LLM 生成完成，答案长度: {len(final_summary)} 字符")
-    else:
-        logger.info("【节点: finalize_answer】使用质量增强的优化摘要")
-
-    # 只返回优化后的调查研究报告，不包含验证报告和质量指标
-    enhanced_content = final_summary
+    # 获取所有原始材料
+    summaries = "\n---\n\n".join(web_research_results)
     
+    # 获取上一步的结构化洞察
+    optimization_data = state.get("summary_optimization", {})
+    key_insights = optimization_data.get("key_insights", [])
+    actionable_items = optimization_data.get("actionable_items", [])
+    
+    logger.info(f"【节点: finalize_answer】核心洞察数量: {len(key_insights)}")
+    logger.info(f"【节点: finalize_answer】可行建议数量: {len(actionable_items)}")
+    
+    # 构建增强的提示词，将结构化洞察注入
+    prompt_enhancement = ""
+    if key_insights or actionable_items:
+        prompt_enhancement = "\n\n---\n\n**以下是基于研究材料提炼出的核心洞察和建议，请将它们作为报告的重点，在报告中详细展开论述：**\n\n"
+        
+        if key_insights:
+            prompt_enhancement += "**核心洞察 (Key Insights):**\n"
+            for i, insight in enumerate(key_insights, 1):
+                prompt_enhancement += f"{i}. {insight}\n"
+            prompt_enhancement += "\n"
+        
+        if actionable_items:
+            prompt_enhancement += "**可行建议 (Actionable Items):**\n"
+            for i, item in enumerate(actionable_items, 1):
+                prompt_enhancement += f"{i}. {item}\n"
+    
+    # 使用 answer_instructions 来撰写报告
+    formatted_prompt = answer_instructions.format(
+        current_date=get_current_date(),
+        research_topic=get_research_topic(state["messages"]),
+        summaries=summaries + prompt_enhancement  # 将洞察注入提示词
+    )
+    
+    logger.info("【节点: finalize_answer】调用 LLM 生成专业报告...")
+    gemini_base_url = get_gemini_base_url()
+    
+    # *** 关键：这里不使用 .with_structured_output()，直接生成纯文本报告 ***
+    llm = ChatOpenAI(
+        model=reasoning_model,
+        temperature=0.2,
+        max_retries=2,
+        api_key=settings.GEMINI_API_KEY,
+        base_url=gemini_base_url,
+        timeout=settings.API_TIMEOUT,
+    )
+    result = llm.invoke(formatted_prompt)
+    final_report = result.content  # 这就是纯 Markdown 报告
+    
+    logger.info(f"【节点: finalize_answer】LLM 生成完成，报告长度: {len(final_report)} 字符")
+    
+    # 处理数据源引用
     logger.info("【节点: finalize_answer】处理数据源引用...")
     unique_sources: List[Dict[str, Any]] = []
+    enhanced_content = final_report
+    
     for source in sources_gathered:
         if source["short_url"] in enhanced_content:
             enhanced_content = enhanced_content.replace(source["short_url"], source["value"])
