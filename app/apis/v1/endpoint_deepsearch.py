@@ -37,18 +37,18 @@ async def run_deepsearch(
     """
     logger.info(f"=== DeepSearch 请求开始 ===")
     logger.info(f"查询内容: {request.query[:200]}...")  # 只记录前200个字符
-    logger.info(f"初始搜索查询数量: {request.initial_search_query_count}")
-    logger.info(f"最大研究循环次数: {request.max_research_loops}")
-    logger.info(f"推理模型: {request.reasoning_model}")
+    logger.info(f"初始搜索查询数量: {request.initialSearchQueryCount}")
+    logger.info(f"最大研究循环次数: {request.maxResearchLoops}")
+    logger.info(f"推理模型: {request.reasoningModel}")
     
     try:
         result = await deepsearch_service.run(request)
         logger.info(f"=== DeepSearch 请求成功完成 ===")
         logger.info(f"答案长度: {len(result.answer)} 字符")
         logger.info(f"被引用数据源数量: {len(result.sources)}")
-        logger.info(f"所有搜索到的资源数量: {len(result.all_sources)}")
-        logger.info(f"研究循环次数: {result.metadata.get('research_loop_count', 'N/A')}")
-        logger.info(f"搜索查询总数: {result.metadata.get('number_of_queries', 'N/A')}")
+        logger.info(f"所有搜索到的资源数量: {len(result.allSources)}")
+        logger.info(f"研究循环次数: {result.metadata.get('researchLoopCount', 'N/A')}")
+        logger.info(f"搜索查询总数: {result.metadata.get('numberOfQueries', 'N/A')}")
         return result
     except Exception as e:
         logger.error(f"DeepSearch 执行失败: {e}", exc_info=True)
@@ -80,22 +80,22 @@ async def run_deepsearch_stream(
     """
     logger.info(f"=== DeepSearch 流式请求开始 ===")
     logger.info(f"查询内容: {request.query[:200]}...")
-    logger.info(f"报告格式: {request.report_format}")
+    logger.info(f"报告格式: {request.reportFormat}")
     
     async def event_generator():
         """事件生成器."""
         try:
             async for event in deepsearch_service.run_stream(request):
                 # SSE 格式
-                yield f"event: {event.event_type}\n"
+                yield f"event: {event.eventType}\n"
                 yield f"data: {event.model_dump_json()}\n\n"
         except Exception as e:
             logger.error(f"流式执行失败: {e}", exc_info=True)
             # 发送错误事件
             error_event = DeepSearchEvent(
-                event_type=DeepSearchEventType.ERROR,
+                eventType=DeepSearchEventType.ERROR,
                 timestamp=datetime.now().isoformat(),
-                sequence_number=9999,
+                sequenceNumber=9999,
                 data={"error": str(e)},
                 message=f"执行失败: {str(e)}"
             )

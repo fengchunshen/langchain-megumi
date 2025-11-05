@@ -4,9 +4,9 @@ from pydantic import BaseModel, Field
 
 class ResearchPlan(BaseModel):
     """为研究主题制定的结构化研究方案。"""
-    research_topic: str = Field(description="重述或优化的核心研究主题")
-    sub_topics: List[str] = Field(description="关键子主题列表 (3-5个)")
-    research_questions: List[str] = Field(description="每个子主题对应的具体研究问题列表 (每个子主题2-3个问题，用「子主题：问题」格式)")
+    researchTopic: str = Field(description="重述或优化的核心研究主题")
+    subTopics: List[str] = Field(description="关键子主题列表 (3-5个)")
+    researchQuestions: List[str] = Field(description="每个子主题对应的具体研究问题列表 (每个子主题2-3个问题，用「子主题：问题」格式)")
     rationale: str = Field(description="制定此研究方案的理由")
 
 
@@ -17,8 +17,8 @@ class SearchQueryList(BaseModel):
 
 class Reflection(BaseModel):
     is_sufficient: bool = Field(description="Whether the provided summaries are sufficient to answer the user's question.")
-    knowledge_gap: str = Field(description="A description of what information is missing or needs clarification.")
-    follow_up_queries: List[str] = Field(description="A list of follow-up queries to address the knowledge gap.")
+    knowledgeGap: str = Field(description="A description of what information is missing or needs clarification.")
+    followUpQueries: List[str] = Field(description="A list of follow-up queries to address the knowledge gap.")
 
 
 class ContentQualityAssessment(BaseModel):

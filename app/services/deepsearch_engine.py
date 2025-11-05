@@ -251,10 +251,10 @@ class OverallState(TypedDict, total=False):
     web_research_result: Annotated[List, operator.add]
     sources_gathered: Annotated[List, operator.add]
     all_sources_gathered: Annotated[List, operator.add]  # 所有搜索到的资源（包括未被引用的）
-    initial_search_query_count: int
-    max_research_loops: int
+    initialSearchQueryCount: int
+    maxResearchLoops: int
     research_loop_count: int
-    reasoning_model: str
+    reasoningModel: str
     # 质量增强相关字段
     content_quality: Dict[str, Any]
     fact_verification: Dict[str, Any]
@@ -270,7 +270,7 @@ class ReflectionState(TypedDict):
     follow_up_queries: Annotated[List, operator.add]
     research_loop_count: int
     number_of_ran_queries: int
-    max_research_loops: int  # 添加最大研究循环次数字段
+    maxResearchLoops: int  # 添加最大研究循环次数字段
 
 
 class Query(TypedDict):
@@ -293,7 +293,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     """
     logger.info("【节点: generate_research_plan】开始生成研究方案...")
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     research_topic = get_research_topic(state["messages"])
     logger.info(f"【节点: generate_research_plan】研究主题: {research_topic[:200]}...")
@@ -311,9 +311,9 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
             temperature=0.5,
             structured_output_type=ResearchPlan
         )
-        logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
-        logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
-        for idx, sub_topic in enumerate(plan.sub_topics, 1):
+        logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.subTopics)} 个子主题")
+        logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.researchQuestions)}")
+        for idx, sub_topic in enumerate(plan.subTopics, 1):
             logger.info(f"【节点: generate_research_plan】  子主题 {idx}: {sub_topic}")
         return {"research_plan": plan}
     except Exception as e:
@@ -323,14 +323,14 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
 
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     logger.info("【节点: generate_query】开始生成搜索查询...")
-    initial_count = state.get("initial_search_query_count")
+    initial_count = state.get("initialSearchQueryCount")
     if initial_count is None:
         initial_count = 3
-        state["initial_search_query_count"] = initial_count
+        state["initialSearchQueryCount"] = initial_count
     
     logger.info(f"【节点: generate_query】初始搜索查询数量: {initial_count}")
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     logger.info(f"【节点: generate_query】使用模型: {reasoning_model}")
 
     research_topic = get_research_topic(state["messages"])
@@ -338,19 +338,19 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     
     # 将方案格式化为字符串
     plan_str = "无特定方案，请直接分析研究主题。"
-    if research_plan and research_plan.sub_topics:
-        logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
-        plan_str = f"主题: {research_plan.research_topic}\n\n关键子主题和研究问题:\n"
+    if research_plan and research_plan.subTopics:
+        logger.info(f"【节点: generate_query】基于方案 '{research_plan.researchTopic}' 生成查询")
+        plan_str = f"主题: {research_plan.researchTopic}\n\n关键子主题和研究问题:\n"
         
         # 按子主题分组研究问题
-        for i, sub_topic in enumerate(research_plan.sub_topics, 1):
+        for i, sub_topic in enumerate(research_plan.subTopics, 1):
             plan_str += f"\n{i}. {sub_topic}\n"
             plan_str += "   研究问题:\n"
             # 找出属于当前子主题的研究问题
-            topic_questions = [q for q in research_plan.research_questions if q.startswith(f"{sub_topic}：")]
+            topic_questions = [q for q in research_plan.researchQuestions if q.startswith(f"{sub_topic}：")]
             if not topic_questions:
                 # 如果没有严格匹配的，尝试模糊匹配
-                topic_questions = [q for q in research_plan.research_questions if sub_topic in q]
+                topic_questions = [q for q in research_plan.researchQuestions if sub_topic in q]
             for j, question in enumerate(topic_questions, 1):
                 # 移除「子主题：」前缀，只显示问题本身
                 question_text = question.split("：", 1)[-1] if "：" in question else question
@@ -532,7 +532,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
     loop_count = state["research_loop_count"]
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: reflection】开始反思，研究循环次数: {loop_count}")
     logger.info(f"【节点: reflection】使用模型: {reasoning_model}")
@@ -564,25 +564,25 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         logger.info(f"【节点: reflection】  ✅ 评估结果: 信息已充足，可以开始生成报告")
     else:
         logger.info(f"【节点: reflection】  ⚠️  评估结果: 信息不足，需要继续研究")
-        logger.info(f"【节点: reflection】  知识缺口: {result.knowledge_gap[:200] if result.knowledge_gap else 'N/A'}...")
-        follow_up_count = len(result.follow_up_queries) if result.follow_up_queries else 0
+        logger.info(f"【节点: reflection】  知识缺口: {result.knowledgeGap[:200] if result.knowledgeGap else 'N/A'}...")
+        follow_up_count = len(result.followUpQueries) if result.followUpQueries else 0
         logger.info(f"【节点: reflection】  后续查询数量: {follow_up_count}")
         if follow_up_count > 0:
-            for idx, query in enumerate(result.follow_up_queries[:3], 1):  # 只记录前3个
+            for idx, query in enumerate(result.followUpQueries[:3], 1):  # 只记录前3个
                 logger.info(f"【节点: reflection】    后续查询 {idx}: {query[:100]}...")
 
     return {
         "is_sufficient": result.is_sufficient,
-        "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
+        "knowledge_gap": result.knowledgeGap,
+        "follow_up_queries": result.followUpQueries,
         "research_loop_count": state["research_loop_count"],
         "number_of_ran_queries": len(state["search_query"]),
-        "max_research_loops": state.get("max_research_loops", 5),  # 传递最大循环次数，默认5
+        "maxResearchLoops": state.get("maxResearchLoops", 5),  # 传递最大循环次数，默认5
     }
 
 
 def evaluate_research(state: ReflectionState, config: RunnableConfig) -> OverallState:
-    max_research_loops = state.get("max_research_loops", 5)  # 默认5次循环
+    max_research_loops = state.get("maxResearchLoops", 5)  # 默认5次循环
     loop_count = state["research_loop_count"]
     is_sufficient = state["is_sufficient"]
     
@@ -628,7 +628,7 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
         content=combined_content
     )
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: assess_content_quality】使用模型: {reasoning_model}")
     
@@ -668,7 +668,7 @@ def verify_facts(state: OverallState, config: RunnableConfig):
         content=combined_content
     )
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: verify_facts】使用模型: {reasoning_model}")
     
@@ -725,7 +725,7 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
         content=combined_content
     )
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: assess_relevance】使用模型: {reasoning_model}")
     
@@ -769,7 +769,7 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
         relevance_assessment=str(state.get("relevance_assessment", {}))
     )
     
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: optimize_summary】使用模型: {reasoning_model}")
     
@@ -851,7 +851,7 @@ def generate_verification_report(state: OverallState, config: RunnableConfig):
 
 def finalize_answer(state: OverallState, config: RunnableConfig):
     """生成最终答案，返回高度围绕用户提问的调查研究报告。"""
-    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    reasoning_model = state.get("reasoningModel") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: finalize_answer】开始生成最终答案")
     logger.info(f"【节点: finalize_answer】使用模型: {reasoning_model}")
@@ -913,8 +913,8 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     enhanced_content = final_report
     
     for source in sources_gathered:
-        if source["short_url"] in enhanced_content:
-            enhanced_content = enhanced_content.replace(source["short_url"], source["value"])
+        if source["shortUrl"] in enhanced_content:
+            enhanced_content = enhanced_content.replace(source["shortUrl"], source["value"])
             unique_sources.append(source)
     
     logger.info(f"【节点: finalize_answer】最终答案包含 {len(unique_sources)} 个被引用的数据源")

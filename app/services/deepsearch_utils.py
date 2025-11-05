@@ -74,7 +74,7 @@ def insert_citation_markers(text: str, citations_list: List[Dict[str, Any]]) -> 
         end_idx = citation_info["end_index"]
         marker_to_insert = ""
         for segment in citation_info["segments"]:
-            marker_to_insert += f" [{segment['label']}]({segment['short_url']})"
+            marker_to_insert += f" [{segment['label']}]({segment['shortUrl']})"
         modified_text = modified_text[:end_idx] + marker_to_insert + modified_text[end_idx:]
     return modified_text
 
@@ -112,7 +112,7 @@ def get_citations(response: Any, resolved_urls_map: Dict[str, str]) -> List[Dict
                     citation["segments"].append(
                         {
                             "label": chunk.web.title.split(".")[:-1][0],
-                            "short_url": resolved_url,
+                            "shortUrl": resolved_url,
                             "value": chunk.web.uri,
                         }
                     )
@@ -210,7 +210,7 @@ def get_citations_from_bocha(
             "segments": [
                 {
                     "label": title[:50] if title else site_name[:50] if site_name else f"来源{idx}",
-                    "short_url": resolved_urls_map.get(url, url),
+                    "shortUrl": resolved_urls_map.get(url, url),
                     "value": url,
                 }
             ],
