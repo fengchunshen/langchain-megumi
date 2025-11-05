@@ -1,4 +1,12 @@
 """FastAPI 应用主入口."""
+import sys
+from pathlib import Path
+
+# 添加项目根目录到 Python 路径，确保可以直接运行此文件
+project_root = Path(__file__).parent.parent.resolve()
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
@@ -94,12 +102,24 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=settings.DEBUG,
-        timeout_keep_alive=600,  # 保持连接超时时间（秒），用于长时间任务
-        timeout_graceful_shutdown=600  # 优雅关闭超时时间（秒）
-    )
+    # 根据 DEBUG 模式选择启动方式
+    # reload 模式需要模块路径字符串，非 reload 模式可以直接传递 app 对象
+    if settings.DEBUG:
+        uvicorn.run(
+            "app.main:app",
+            host=settings.HOST,
+            port=settings.PORT,
+            reload=True,
+            timeout_keep_alive=600,  # 保持连接超时时间（秒），用于长时间任务
+            timeout_graceful_shutdown=600  # 优雅关闭超时时间（秒）
+        )
+    else:
+        uvicorn.run(
+            app,
+            host=settings.HOST,
+            port=settings.PORT,
+            reload=False,
+            timeout_keep_alive=600,  # 保持连接超时时间（秒），用于长时间任务
+            timeout_graceful_shutdown=600  # 优雅关闭超时时间（秒）
+        )
 
