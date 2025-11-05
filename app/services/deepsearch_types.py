@@ -2,6 +2,13 @@ from typing import List, Dict
 from pydantic import BaseModel, Field
 
 
+class ResearchPlan(BaseModel):
+    """为研究主题制定的结构化研究方案。"""
+    research_topic: str = Field(description="重述或优化的核心研究主题")
+    sub_topics: List[str] = Field(description="为回答核心主题需要研究的关键子主题列表 (3-5个)")
+    rationale: str = Field(description="制定此研究方案的理由")
+
+
 class SearchQueryList(BaseModel):
     query: List[str] = Field(description="A list of search queries to be used for web research.")
     rationale: str = Field(description="A brief explanation of why these queries are relevant to the research topic.")

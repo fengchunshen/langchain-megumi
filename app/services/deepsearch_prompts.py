@@ -5,6 +5,25 @@ def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
 
+research_plan_instructions = """你是一名专业的高级研究分析师。你的任务是为给定的研究主题制定一个详细、结构化的研究方案。
+
+指令：
+- 深入理解用户的研究主题。
+- 将主题分解为 3-5 个关键的子主题或要回答的核心问题。
+- 确保这些子主题能够全面覆盖用户的需求，并且逻辑清晰、层层递进。
+- 提供一个简短的理由，说明为什么这个方案是有效的。
+
+输出格式：
+- 将您的回复格式化为具有这些确切键的JSON对象：
+   - "research_topic": 重述或优化的核心研究主题
+   - "sub_topics": 关键子主题列表
+   - "rationale": 制定此研究方案的理由
+
+研究主题：
+{research_topic}
+"""
+
+
 query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
 
 Instructions:
@@ -14,6 +33,9 @@ Instructions:
 - Queries should be diverse, if the topic is broad, generate more than 1 query.
 - Don't generate multiple similar queries, 1 is enough.
 - Query should ensure that the most current information is gathered. The current date is {current_date}.
+
+研究方案 (Research Plan):
+{research_plan}
 
 Format: 
 - Format your response as a JSON object with ALL two of these exact keys:

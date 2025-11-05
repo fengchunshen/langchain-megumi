@@ -23,6 +23,7 @@ from .deepsearch_prompts import (
     fact_verification_instructions,
     relevance_assessment_instructions,
     summary_optimization_instructions,
+    research_plan_instructions,
 )
 from .deepsearch_utils import (
     get_citations_from_bocha,
@@ -38,6 +39,7 @@ from .deepsearch_types import (
     FactVerification,
     RelevanceAssessment,
     SummaryOptimization,
+    ResearchPlan,
 )
 
 
@@ -64,6 +66,7 @@ if not settings.GEMINI_API_KEY:
 
 class OverallState(TypedDict, total=False):
     messages: Annotated[List, add_messages]
+    research_plan: Optional[ResearchPlan]
     search_query: Annotated[List, operator.add]
     web_research_result: Annotated[List, operator.add]
     sources_gathered: Annotated[List, operator.add]
@@ -104,6 +107,42 @@ class WebSearchState(TypedDict):
     id: str
 
 
+def generate_research_plan(state: OverallState, config: RunnableConfig) -> OverallState:
+    """
+    生成研究方案节点。
+    """
+    logger.info("【节点: generate_research_plan】开始生成研究方案...")
+    
+    reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
+    gemini_base_url = get_gemini_base_url()
+    
+    llm = ChatOpenAI(
+        model=reasoning_model,
+        temperature=0.5,
+        max_retries=2,
+        api_key=settings.GEMINI_API_KEY,
+        base_url=gemini_base_url,
+        timeout=settings.API_TIMEOUT,
+    )
+    structured_llm = llm.with_structured_output(ResearchPlan)
+    
+    research_topic = get_research_topic(state["messages"])
+    logger.info(f"【节点: generate_research_plan】研究主题: {research_topic[:200]}...")
+    
+    formatted_prompt = research_plan_instructions.format(
+        research_topic=research_topic
+    )
+    
+    logger.info("【节点: generate_research_plan】调用 LLM 生成方案...")
+    try:
+        plan = structured_llm.invoke(formatted_prompt)
+        logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
+        return {"research_plan": plan}
+    except Exception as e:
+        logger.error(f"【节点: generate_research_plan】生成方案失败: {e}", exc_info=True)
+        return {"research_plan": None}
+
+
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     logger.info("【节点: generate_query】开始生成搜索查询...")
     initial_count = state.get("initial_search_query_count")
@@ -131,15 +170,29 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     structured_llm = llm.with_structured_output(SearchQueryList)
 
     research_topic = get_research_topic(state["messages"])
+    research_plan = state.get("research_plan")
+    
+    # 将方案格式化为字符串
+    plan_str = "无特定方案，请直接分析研究主题。"
+    if research_plan and research_plan.sub_topics:
+        logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
+        plan_str = f"主题: {research_plan.research_topic}\n关键子主题:\n"
+        for i, sub_topic in enumerate(research_plan.sub_topics, 1):
+            plan_str += f"{i}. {sub_topic}\n"
+        plan_str += f"理由: {research_plan.rationale}"
+    else:
+        logger.warning("【节点: generate_query】未找到研究方案，将仅基于主题生成查询")
+    
     logger.info(f"【节点: generate_query】研究主题: {research_topic[:200]}...")
     
     formatted_prompt = query_writer_instructions.format(
         current_date=get_current_date(),
         research_topic=research_topic,
+        research_plan=plan_str,
         number_queries=initial_count,
     )
     
-    logger.info("【节点: generate_query】调用 LLM 生成查询...")
+    logger.info("【节点: generate_query】调用 LLM (基于方案) 生成查询...")
     result = structured_llm.invoke(formatted_prompt)
     
     query_count = len(result.query) if result.query else 0
@@ -699,6 +752,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
 
 
 _builder = StateGraph(OverallState)
+_builder.add_node("generate_research_plan", generate_research_plan)
 _builder.add_node("generate_query", generate_query)
 _builder.add_node("web_research", web_research)
 _builder.add_node("reflection", reflection)
@@ -711,7 +765,8 @@ _builder.add_node("generate_verification_report", generate_verification_report)
 _builder.add_node("finalize_answer", finalize_answer)
 
 # 设置入口点
-_builder.add_edge(START, "generate_query")
+_builder.add_edge(START, "generate_research_plan")
+_builder.add_edge("generate_research_plan", "generate_query")
 _builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])
 _builder.add_edge("web_research", "reflection")
 _builder.add_conditional_edges("reflection", evaluate_research, ["web_research", "assess_content_quality"])
@@ -728,6 +783,6 @@ _builder.add_edge("finalize_answer", END)
 
 graph = _builder.compile(name="enhanced-pro-search-engine")
 
-logger.info("【图构建完成】增强型 Pro Search Engine 已编译完成")
+logger.info("【图构建完成】增强型 Pro Search Engine 已编译完成 (已加入研究方案步骤)")
 
 
