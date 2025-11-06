@@ -186,9 +186,9 @@ def invoke_llm_with_fallback(
             logger.error(f"【节点: {node_name}】Qwen3Max 调用失败: {str(e)}", exc_info=True)
             raise e
     
-    # 尝试使用 Gemini（重试2次）
+    # 尝试使用 Gemini（重试1次）
     last_error = None
-    for attempt in range(3):  # 第一次 + 2次重试 = 总共3次尝试
+    for attempt in range(2):  # 第一次 + 1次重试 = 总共2次尝试
         try:
             if attempt == 0:
                 logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
@@ -212,12 +212,12 @@ def invoke_llm_with_fallback(
             
         except Exception as e:
             last_error = e
-            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/3): {str(e)}")
-            if attempt < 2:  # 还有重试机会
+            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/2): {str(e)}")
+            if attempt < 1:  # 还有重试机会
                 continue
             else:
                 # 所有重试都失败，切换到 Qwen3Max 并设置降级标志
-                logger.warning(f"【节点: {node_name}】Gemini 重试2次后仍失败，切换到 Qwen3Max ({qwen_model})...")
+                logger.warning(f"【节点: {node_name}】Gemini 重试1次后仍失败，切换到 Qwen3Max ({qwen_model})...")
                 logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
                 _gemini_degraded = True
                 break
