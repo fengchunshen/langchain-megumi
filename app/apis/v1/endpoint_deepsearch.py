@@ -1,5 +1,5 @@
-"""DeepSearch 研究流程 API 端点。"""
-from fastapi import APIRouter, HTTPException, Depends
+"""DeepSearch 研究流程 API 端点."""
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from datetime import datetime
 from app.models.deepsearch import (
@@ -9,6 +9,7 @@ from app.models.deepsearch import (
     DeepSearchEventType
 )
 from app.services.deepsearch_service import deepsearch_service
+from app.services.sse_monitor import sse_monitor
 import logging
 
 
@@ -35,20 +36,8 @@ async def run_deepsearch(
     Returns:
         DeepSearchResponse: DeepSearch响应结果
     """
-    logger.info(f"=== DeepSearch 请求开始 ===")
-    logger.info(f"查询内容: {request.query[:200]}...")  # 只记录前200个字符
-    logger.info(f"初始搜索查询数量: {request.initial_search_query_count}")
-    logger.info(f"最大研究循环次数: {request.max_research_loops}")
-    logger.info(f"推理模型: {request.reasoning_model}")
-    
     try:
         result = await deepsearch_service.run(request)
-        logger.info(f"=== DeepSearch 请求成功完成 ===")
-        logger.info(f"答案长度: {len(result.answer)} 字符")
-        logger.info(f"被引用数据源数量: {len(result.sources)}")
-        logger.info(f"所有搜索到的资源数量: {len(result.all_sources)}")
-        logger.info(f"研究循环次数: {result.metadata.get('research_loop_count', 'N/A')}")
-        logger.info(f"搜索查询总数: {result.metadata.get('number_of_queries', 'N/A')}")
         return result
     except Exception as e:
         logger.error(f"DeepSearch 执行失败: {e}", exc_info=True)
@@ -57,7 +46,8 @@ async def run_deepsearch(
 
 @router.post("/run/stream")
 async def run_deepsearch_stream(
-    request: DeepSearchRequest,
+    request: Request,
+    request_data: DeepSearchRequest,
 ):
     """
     DeepSearch 流式接口（SSE）.
@@ -73,31 +63,55 @@ async def run_deepsearch_stream(
     ```
     
     Args:
-        request: DeepSearch请求
+        request: FastAPI请求对象
+        request_data: DeepSearch请求
         
     Returns:
         StreamingResponse: SSE流式响应
     """
-    logger.info(f"=== DeepSearch 流式请求开始 ===")
-    logger.info(f"查询内容: {request.query[:200]}...")
-    logger.info(f"报告格式: {request.report_format}")
+    # 从请求头获取客户端信息
+    client_ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    
+    # 创建监控连接
+    connection_id = await sse_monitor.create_connection(
+        user_id=None,  # 如果有认证系统，从token中获取
+        request_query=request_data.query,
+        client_ip=client_ip,
+        user_agent=user_agent
+    )
+    
+    logger.info(f"DeepSearch流式请求开始: {connection_id}")
     
     async def event_generator():
         """事件生成器."""
         try:
-            async for event in deepsearch_service.run_stream(request):
+            # 使用监控的迭代器包装原始服务
+            async for event in deepsearch_service.run_stream(request_data):
+                # 更新监控信息
+                await sse_monitor.update_activity(connection_id)
+                
                 # SSE 格式
                 yield f"event: {event.event_type}\n"
                 yield f"data: {event.model_dump_json()}\n\n"
+            
+            # 标记连接完成
+            await sse_monitor.complete_connection(connection_id)
+            
         except Exception as e:
-            logger.error(f"流式执行失败: {e}", exc_info=True)
+            error_msg = str(e)
+            logger.error(f"流式执行失败 [{connection_id}]: {e}", exc_info=True)
+            
+            # 标记连接错误
+            await sse_monitor.error_connection(connection_id, error_msg)
+            
             # 发送错误事件
             error_event = DeepSearchEvent(
                 eventType=DeepSearchEventType.ERROR,
                 timestamp=datetime.now().isoformat(),
                 sequenceNumber=9999,
-                data={"error": str(e)},
-                message=f"执行失败: {str(e)}"
+                data={"error": error_msg},
+                message=f"执行失败: {error_msg}"
             )
             yield f"event: error\n"
             yield f"data: {error_event.model_dump_json()}\n\n"
@@ -109,6 +123,7 @@ async def run_deepsearch_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
+            "X-Connection-ID": connection_id,  # 返回连接ID给客户端
         }
     )
 

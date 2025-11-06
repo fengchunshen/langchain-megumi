@@ -16,7 +16,8 @@ from app.apis.v1 import (
     endpoint_fastgpt,
     endpoint_agent,
     endpoint_analysis,
-    endpoint_deepsearch
+    endpoint_deepsearch,
+    endpoint_monitor
 )
 import logging
 
@@ -81,6 +82,13 @@ app.include_router(
     endpoint_deepsearch.router,
     prefix=f"{settings.API_V1_PREFIX}/deepsearch",
     tags=["DeepSearch"]
+)
+
+# 注册监控路由
+app.include_router(
+    endpoint_monitor.router,
+    prefix=f"{settings.API_V1_PREFIX}/monitor",
+    tags=["系统监控"]
 )
 
 
