@@ -5,32 +5,51 @@ from pydantic import field_validator, FieldValidationInfo
 
 class ResearchPlan(BaseModel):
     """为研究主题制定的结构化研究方案。"""
-    researchTopic: str = Field(description="重述或优化的核心研究主题", alias="research_topic")
-    subTopics: List[str] = Field(description="关键子主题列表 (3-5个)", alias="sub_topics")
-    researchQuestions: List[str] = Field(description="每个子主题对应的具体研究问题列表 (每个子主题2-3个问题，用「子主题：问题」格式)", alias="research_questions")
+    research_topic: str = Field(description="重述或优化的核心研究主题", alias="researchTopic")
+    sub_topics: List[str] = Field(description="关键子主题列表 (3-5个)", alias="subTopics")
+    research_questions: List[str] = Field(description="每个子主题对应的具体研究问题列表 (每个子主题2-3个问题，用「子主题：问题」格式)", alias="researchQuestions")
     rationale: str = Field(description="制定此研究方案的理由")
     
     @field_validator('rationale')
     @classmethod
     def validate_rationale(cls, v, info: FieldValidationInfo):
-        # 如果没有 rationale 字段，可以从其他字段生成一个默认值
-        if not v and 'researchTopic' in info.data:
-            research_topic = info.data.get('researchTopic', '')
-            return f"基于研究主题'{research_topic}'制定的系统化研究方案，旨在全面分析该主题的关键要素。"
+        # 如果没有 rationale 字段，可以从其他字段生成一个更详细的默认值
+        if not v and 'research_topic' in info.data:
+            research_topic = info.data.get('research_topic', '')
+            sub_topics = info.data.get('sub_topics', [])
+            
+            if sub_topics:
+                topic_count = len(sub_topics)
+                return f"基于研究主题'{research_topic}'制定的研究方案，采用系统化分析方法。通过将复杂主题分解为{topic_count}个核心子主题，确保研究的全面性和深度。每个子主题都设计了具体的研究问题，旨在深入挖掘该领域的不同维度，为用户提供全面、专业的研究洞察和可操作的建议。"
+            else:
+                return f"基于研究主题'{research_topic}'制定的系统化研究方案，旨在通过结构化的分析框架全面探索该主题的关键要素，采用深入研究和多角度分析的方法来确保研究结论的准确性和实用性。"
         return v
     
     model_config = {
         "populate_by_name": True,  # 允许使用字段名或别名
         "json_schema_extra": {
             "examples": [{
-                "researchTopic": "人工智能在医疗诊断中的应用现状",
-                "subTopics": ["AI诊断技术现状", "临床应用案例", "技术挑战分析"],
-                "researchQuestions": [
-                    "AI诊断技术现状：当前主流的AI诊断技术有哪些？",
-                    "临床应用案例：AI在哪些医疗场景中已得到应用？",
-                    "技术挑战分析：AI医疗诊断面临哪些技术挑战？"
+                "research_topic": "人工智能在医疗诊断中的应用现状与发展趋势",
+                "sub_topics": [
+                    "AI诊断技术现状：深度学习、计算机视觉在医疗影像分析中的具体应用和技术原理",
+                    "临床应用案例分析：三甲医院中已部署的AI诊断系统及其实际效果评估",
+                    "技术挑战与限制：数据质量、算法透明度、监管合规等关键挑战的深度分析",
+                    "未来发展趋势：多模态融合、个性化医疗、远程诊断等前沿发展方向"
                 ],
-                "rationale": "基于用户查询自动生成的研究框架，旨在全面分析该主题的关键要素。"
+                "research_questions": [
+                    "AI诊断技术现状：当前主流的深度学习算法在医疗影像识别中的准确率和适用场景如何？",
+                    "AI诊断技术现状：计算机视觉技术如何处理不同类型的医疗影像数据？",
+                    "AI诊断技术现状：AI辅助诊断系统的技术架构和核心组件有哪些？",
+                    "临床应用案例分析：国内三甲医院已实施的AI诊断系统有哪些具体案例？",
+                    "临床应用案例分析：这些系统的诊断准确率、医生接受度如何？",
+                    "临床应用案例分析：AI诊断系统在实际临床流程中的集成方式是怎样的？",
+                    "技术挑战与限制：医疗数据的隐私保护和标注质量如何影响AI效果？",
+                    "技术挑战与限制：AI诊断的透明度和可解释性如何满足临床需求？",
+                    "技术挑战与限制：相关医疗器械认证和监管合规面临哪些具体挑战？",
+                    "未来发展趋势：多模态医疗数据融合将如何提升诊断准确性？",
+                    "未来发展趋势：个性化医疗和精准治疗中AI将发挥什么作用？"
+                ],
+                "rationale": "本研究方案采用系统化分析框架，首先从技术原理层面深入了解AI在医疗诊断中的具体应用方式和能力边界，再通过临床实际案例验证技术的可行性和效果，进一步分析当前面临的关键挑战以识别改进方向，最后展望未来发展趋势以提供前瞻性洞察。该方案确保研究既有深度又有广度，能够为医疗AI的发展提供全面的分析和建议。"
             }]
         }
     }

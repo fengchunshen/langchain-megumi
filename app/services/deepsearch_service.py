@@ -41,15 +41,15 @@ class DeepSearchService:
                 "messages": [HumanMessage(content=request.query)],
             }
 
-            if request.initialSearchQueryCount is not None:
-                state["initialSearchQueryCount"] = request.initialSearchQueryCount
-                logger.info(f"设置 initialSearchQueryCount = {request.initialSearchQueryCount}")
-            if request.maxResearchLoops is not None:
-                state["maxResearchLoops"] = request.maxResearchLoops
-                logger.info(f"设置 maxResearchLoops = {request.maxResearchLoops}")
-            if request.reasoningModel is not None:
-                state["reasoningModel"] = request.reasoningModel
-                logger.info(f"设置 reasoningModel = {request.reasoningModel}")
+            if request.initial_search_query_count is not None:
+                state["initial_search_query_count"] = request.initial_search_query_count
+                logger.info(f"设置 initial_search_query_count = {request.initial_search_query_count}")
+            if request.max_research_loops is not None:
+                state["max_research_loops"] = request.max_research_loops
+                logger.info(f"设置 max_research_loops = {request.max_research_loops}")
+            if request.reasoning_model is not None:
+                state["reasoning_model"] = request.reasoning_model
+                logger.info(f"设置 reasoning_model = {request.reasoning_model}")
 
             logger.info(f"初始状态构建完成: {list(state.keys())}")
 
@@ -63,7 +63,7 @@ class DeepSearchService:
             # 构建响应
             response = self._build_response(request, result_state)
             
-            logger.info(f"结果提取完成 - 答案长度: {len(response.answer)}, 被引用数据源数量: {len(response.sources)}, 所有搜索到的资源数量: {len(response.allSources)}")
+            logger.info(f"结果提取完成 - 答案长度: {len(response.answer)}, 被引用数据源数量: {len(response.sources)}, 所有搜索到的资源数量: {len(response.all_sources)}")
             
             return response
         except Exception as e:
@@ -115,9 +115,9 @@ class DeepSearchService:
                             yield self._create_event(
                                 DeepSearchEventType.RESEARCH_PLAN,
                                 ResearchPlanEventData(
-                                    researchTopic=plan.researchTopic,
-                                    subTopics=plan.subTopics,
-                                    researchQuestions=plan.researchQuestions,
+                                    research_topic=plan.research_topic,
+                                    sub_topics=plan.sub_topics,
+                                    research_questions=plan.research_questions,
                                     rationale=plan.rationale
                                 ).model_dump(),
                                 "研究计划已生成"
@@ -174,10 +174,10 @@ class DeepSearchService:
                             yield self._create_event(
                                 DeepSearchEventType.REFLECTION,
                                 ReflectionEventData(
-                                    loopCount=node_output.get("research_loop_count", 0),
+                                    loop_count=node_output.get("research_loop_count", 0),
                                     is_sufficient=node_output.get("is_sufficient", False),
-                                    knowledgeGap=node_output.get("knowledge_gap"),
-                                    followUpQueries=node_output.get("follow_up_queries", [])
+                                    knowledge_gap=node_output.get("knowledge_gap"),
+                                    follow_up_queries=node_output.get("follow_up_queries", [])
                                 ).model_dump(),
                                 "反思评估完成"
                             )
@@ -263,12 +263,12 @@ class DeepSearchService:
             "messages": [HumanMessage(content=request.query)],
         }
         
-        if request.initialSearchQueryCount is not None:
-            state["initialSearchQueryCount"] = request.initialSearchQueryCount
-        if request.maxResearchLoops is not None:
-            state["maxResearchLoops"] = request.maxResearchLoops
-        if request.reasoningModel is not None:
-            state["reasoningModel"] = request.reasoningModel
+        if request.initial_search_query_count is not None:
+            state["initial_search_query_count"] = request.initial_search_query_count
+        if request.max_research_loops is not None:
+            state["max_research_loops"] = request.max_research_loops
+        if request.reasoning_model is not None:
+            state["reasoning_model"] = request.reasoning_model
         
         return state
     
@@ -292,7 +292,7 @@ class DeepSearchService:
                 sources_list.append(
                     DeepSource(
                         label=source.get("label"),
-                        shortUrl=source.get("shortUrl"),
+                        short_url=source.get("shortUrl"),
                         value=source.get("value")
                     )
                 )
@@ -310,14 +310,14 @@ class DeepSearchService:
                     all_sources_list.append(
                         DeepSource(
                             label=source.get("label"),
-                            shortUrl=source.get("shortUrl"),
+                            short_url=source.get("shortUrl"),
                             value=source.get("value")
                         )
                     )
         
         # 生成 Markdown 报告
         markdown_report = ""
-        if request.reportFormat.value == "formal":
+        if request.report_format.value == "formal":
             markdown_report = report_generator.generate_formal_report(
                 query=request.query,
                 research_plan=result_state.get("research_plan"),
@@ -331,8 +331,7 @@ class DeepSearchService:
                     "research_loop_count": result_state.get("research_loop_count", 0),
                     "number_of_queries": len(result_state.get("search_query", [])),
                     "number_of_sources": len(sources_gathered),
-                    "reasoningModel": request.reasoningModel or "自研数据研究模型",
-                    "system_version": "1.0.0"
+                    "total_sources_found": len(all_sources_gathered),
                 }
             )
         else:
@@ -341,18 +340,20 @@ class DeepSearchService:
         
         # 构建元数据
         metadata = {
-            "researchLoopCount": result_state.get("research_loop_count", 0),
-            "numberOfQueries": len(result_state.get("search_query", [])),
-            "numberOfSources": len(sources_gathered),
-            "totalSourcesFound": len(all_sources_gathered),
+            "research_loop_count": result_state.get("research_loop_count", 0),
+            "number_of_queries": len(result_state.get("search_query", [])),
+            "number_of_sources": len(sources_gathered),
+            "total_sources_found": len(all_sources_gathered),
+            "reasoning_model": request.reasoning_model or "自研数据研究模型",
+            "system_version": "1.0.0"
         }
         
         return DeepSearchResponse(
             success=True,
             answer=answer_text,
-            markdownReport=markdown_report,
+            markdown_report=markdown_report,
             sources=sources_list,
-            allSources=all_sources_list,
+            all_sources=all_sources_list,
             metadata=metadata,
             message="研究完成"
         )
@@ -374,9 +375,9 @@ class DeepSearchService:
         """创建事件对象."""
         self.sequenceNumber += 1
         return DeepSearchEvent(
-            eventType=event_type,
+            event_type=event_type,
             timestamp=datetime.now().isoformat(),
-            sequenceNumber=self.sequenceNumber,
+            sequence_number=self.sequenceNumber,
             data=data,
             message=message
         )
@@ -392,12 +393,12 @@ class DeepSearchService:
         return self._create_event(
             DeepSearchEventType.PROGRESS,
             ProgressEvent(
-                currentStep=step_name,
-                totalSteps=total,
-                completedSteps=completed,
+                current_step=step_name,
+                total_steps=total,
+                completed_steps=completed,
                 percentage=percentage
             ).model_dump(),
-            f"进度: {percentage:.1f}%"
+            f"进度: {step_name} ({completed}/{total} - {percentage:.1f}%)"
         )
 
 

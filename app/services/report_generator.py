@@ -50,11 +50,11 @@ class ReportGenerator:
         report_id = str(self.report_counter).zfill(4)
         report_date = datetime.now().strftime("%Y%m%d")
         generation_time = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
-        model_name = metadata.get("reasoningModel", "Gemini 2.0 Flash")
+        model_name = metadata.get("reasoning_model", "Gemini 2.0 Flash")
         confidence_level = summary_optimization.get("confidence_level", "中等")
         
         # 构建报告标题
-        research_topic = research_plan.researchTopic if research_plan else query
+        research_topic = research_plan.research_topic if research_plan else query
         
         markdown = f"""# {research_topic} 研究报告
 
@@ -191,22 +191,22 @@ class ReportGenerator:
     
     def _format_sub_topics(self, research_plan: Optional[ResearchPlan]) -> str:
         """格式化子主题列表."""
-        if not research_plan or not research_plan.subTopics:
-            return "（研究计划未生成详细子主题）"
+        if not research_plan or not research_plan.sub_topics:
+            return ""  # 如果没有研究计划，生成基本报告
         
-        formatted = ""
-        for idx, topic in enumerate(research_plan.subTopics, 1):
-            formatted += f"{idx}. {topic}\n"
+        topics_text = ""
+        for idx, topic in enumerate(research_plan.sub_topics, 1):
+            topics_text += f"{idx}. {topic}\n"
         
-        return formatted.strip()
+        return topics_text.strip()
     
     def _format_research_areas(self, research_plan: Optional[ResearchPlan]) -> str:
         """格式化研究领域."""
-        if not research_plan or not research_plan.subTopics:
+        if not research_plan or not research_plan.sub_topics:
             return "（研究计划未生成详细研究领域）"
         
         formatted = ""
-        for idx, topic in enumerate(research_plan.subTopics, 1):
+        for idx, topic in enumerate(research_plan.sub_topics, 1):
             formatted += f"**领域{idx}：{topic}**\n\n"
             formatted += f"- 研究内容：针对{topic}相关的核心问题进行深入调查\n"
             formatted += f"- 研究方法：通过多源信息收集、交叉验证等方式确保信息准确性\n\n"
@@ -215,14 +215,14 @@ class ReportGenerator:
     
     def _format_research_questions(self, research_plan: Optional[ResearchPlan]) -> str:
         """格式化研究问题."""
-        if not research_plan or not research_plan.researchQuestions:
+        if not research_plan or not research_plan.research_questions:
             return "（研究计划未生成具体研究问题）"
         
-        formatted = ""
-        for idx, question in enumerate(research_plan.researchQuestions, 1):
-            formatted += f"{idx}. {question}\n"
+        questions_text = ""
+        for idx, question in enumerate(research_plan.research_questions, 1):
+            questions_text += f"{idx}. {question}\n"
         
-        return formatted.strip()
+        return questions_text.strip()
     
     def _format_main_findings(self, answer: str) -> str:
         """格式化主要发现."""
@@ -365,15 +365,15 @@ class ReportGenerator:
     
     def _format_research_statistics(self, metadata: Dict[str, Any]) -> str:
         """格式化研究统计数据."""
-        loop_count = metadata.get("researchLoopCount") or 0
-        total_queries = metadata.get("numberOfQueries") or 0
-        total_sources = metadata.get("numberOfSources") or 0
-        total_time = metadata.get("executionTime") or 0.0
+        loop_count = metadata.get("research_loop_count") or 0
+        total_queries = metadata.get("number_of_queries") or 0
+        total_sources = metadata.get("number_of_sources") or 0
+        total_sources_found = metadata.get("total_sources_found") or 0
         
         formatted = f"""- 研究循环次数：{loop_count}次
 - 搜索查询总数：{total_queries}个
 - 处理信息源：{total_sources}个
-- 总耗时：{total_time:.2f}秒"""
+- 发现信息源总数：{total_sources_found}个"""
         
         return formatted
     
@@ -381,8 +381,8 @@ class ReportGenerator:
         """格式化查询历史."""
         # 这里需要从metadata中提取查询历史
         # 简化版本：显示查询总数
-        total_queries = metadata.get("numberOfQueries") or 0
-        loop_count = metadata.get("researchLoopCount") or 0
+        total_queries = metadata.get("number_of_queries") or 0
+        loop_count = metadata.get("research_loop_count") or 0
         
         formatted = f"""本次研究共进行{loop_count}轮调查，生成{total_queries}个搜索查询。
 
