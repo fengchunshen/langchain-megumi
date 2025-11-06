@@ -103,7 +103,7 @@ class ReportGenerator:
 
 ## 三、研究结论
 
-{self._format_main_findings(answer)}
+{self._format_main_findings(answer, sources)}
 
 ---
 
@@ -131,7 +131,7 @@ class ReportGenerator:
 
 ### 5.2 事实验证结果
 
-{self._format_fact_verification(fact_verification)}
+{self._format_fact_verification(fact_verification, sources)}
 
 ### 5.3 可信度评级
 
@@ -224,7 +224,7 @@ class ReportGenerator:
         
         return questions_text.strip()
     
-    def _format_main_findings(self, answer: str) -> str:
+    def _format_main_findings(self, answer: str, sources: Optional[List[Dict[str, Any]]] = None) -> str:
         """格式化主要发现."""
         # 将答案分段处理
         sections = answer.split("\n\n")
@@ -237,7 +237,16 @@ class ReportGenerator:
             if section.strip():
                 main_content.append(section.strip())
         
-        formatted += "\n\n".join(main_content)
+        content_text = "\n\n".join(main_content)
+        
+        # 如果提供了sources，使用新的角标格式
+        if sources:
+            formatted_content = self.format_content_with_citations(content_text, sources)
+            # 只取内容部分，去掉角标定义部分
+            content_with_citations = formatted_content.split("## 引用链接")[0].strip()
+            formatted += content_with_citations
+        else:
+            formatted += content_text
         
         return formatted
     
@@ -297,7 +306,7 @@ class ReportGenerator:
         
         return table
     
-    def _format_fact_verification(self, fact_verification: Dict[str, Any]) -> str:
+    def _format_fact_verification(self, fact_verification: Dict[str, Any], sources: Optional[List[Dict[str, Any]]] = None) -> str:
         """格式化事实验证结果."""
         verified_facts = fact_verification.get("verified_facts_text", [])
         disputed_claims = fact_verification.get("disputed_claims_text", [])
@@ -306,8 +315,13 @@ class ReportGenerator:
         
         if verified_facts:
             for idx, fact in enumerate(verified_facts[:5], 1):  # 只显示前5个
-                source_idx = idx  # 简化处理
-                formatted += f"{idx}. {fact} [来源{source_idx}]\n"
+                if sources and idx <= len(sources):
+                    # 使用角标引用
+                    formatted += f"{idx}. {fact} ^{idx}\n"
+                else:
+                    # 传统的来源格式
+                    source_idx = idx
+                    formatted += f"{idx}. {fact} [来源{source_idx}]\n"
         else:
             formatted += "（暂无已验证事实记录）\n"
         
@@ -359,9 +373,44 @@ class ReportGenerator:
             url = source.get("value", "#")
             access_time = datetime.now().strftime("%Y年%m月%d日")
             
-            formatted += f"[{idx}] {title}. {url}. 访问时间：{access_time}\n\n"
+            formatted += f"[{idx}] {title}. 访问链接：{url}. 访问时间：{access_time}\n\n"
         
         return formatted.strip()
+
+    def format_content_with_citations(self, content: str, sources: List[Dict[str, Any]]) -> str:
+        """
+        在内容中添加角标超链接引用.
+        
+        Args:
+            content: 原始内容文本
+            sources: 来源信息列表
+            
+        Returns:
+            str: 包含角标引用的格式化内容
+        """
+        if not sources:
+            return content
+        
+        # 按段落处理内容，在合适的位置插入角标
+        paragraphs = content.split('\n\n')
+        formatted_paragraphs = []
+        
+        for i, paragraph in enumerate(paragraphs):
+            if paragraph.strip() and i < len(sources):
+                # 在段落末尾添加角标
+                citation = f"^[{i+1}]"
+                formatted_paragraphs.append(paragraph + citation)
+            else:
+                formatted_paragraphs.append(paragraph)
+        
+        # 添加脚注定义
+        footnotes = "\n\n## 引用链接\n\n"
+        for idx, source in enumerate(sources, 1):
+            title = source.get("label", "未知来源")
+            url = source.get("value", "#")
+            footnotes += f"^[{idx}]: [{title}]({url})\n\n"
+        
+        return '\n\n'.join(formatted_paragraphs) + footnotes
     
     def _format_research_statistics(self, metadata: Dict[str, Any]) -> str:
         """格式化研究统计数据."""
