@@ -73,6 +73,58 @@ docker run -d \
 - `POST /api/v1/analysis/analyze-company-tags` - 分析企业经营范围并生成相关标签
 - `GET /api/v1/analysis/health` - AI分析服务健康检查
 - `POST /api/v1/deepsearch/run` - DeepSearch 深度研究流程
+- `POST /api/v1/deepsearch/run/stream` - DeepSearch 流式接口（支持SSE）
+
+## 🔍 SSE监控端点
+
+### 监控API
+
+- `GET /api/v1/monitor/sse/status` - 获取SSE连接状态和统计信息
+- `GET /api/v1/monitor/sse/active-users` - 获取当前活跃的SSE用户列表
+- `GET /api/v1/monitor/system/health` - 系统健康检查
+
+### 监控功能特性
+
+- **实时连接跟踪**: 监控所有活跃的SSE连接
+- **性能指标统计**: 连接成功率、平均响应时间、错误率等
+- **自动清理**: 定期清理过期连接（默认30分钟超时）
+- **健康状态评估**: 基于预设阈值评估系统健康状况
+
+### 监控示例
+
+```bash
+# 查看SSE连接状态
+curl http://localhost:8000/api/v1/monitor/sse/status
+
+# 查看活跃用户
+curl http://localhost:8000/api/v1/monitor/sse/active-users
+
+# 系统健康检查
+curl http://localhost:8000/api/v1/monitor/system/health
+```
+
+### 监控响应示例
+
+```json
+{
+  "success": true,
+  "data": {
+    "active_connections": 5,
+    "total_connections": 156,
+    "success_rate": 91.03,
+    "average_duration": 180.5,
+    "connection_details": [
+      {
+        "connection_id": "sse_123_1730865000",
+        "user_id": null,
+        "status": "active",
+        "duration": 45.2,
+        "events_sent": 8
+      }
+    ]
+  }
+}
+```
 
 ## /analyze-node 接口使用说明
 
@@ -356,13 +408,20 @@ jingboAI_python/
 │   │       ├── endpoint_fastgpt.py
 │   │       ├── endpoint_agent.py
 │   │       ├── endpoint_analysis.py
-│   │       └── endpoint_deepsearch.py
+│   │       ├── endpoint_deepsearch.py
+│   │       └── endpoint_monitor.py  # 系统监控API
 │   ├── core/                  # 核心配置
 │   │   ├── config.py          # 配置管理
 │   │   └── security.py        # 安全相关
 │   ├── models/                # Pydantic 数据模型
 │   ├── services/              # 业务逻辑层
+│   │   ├── sse_monitor.py     # SSE监控服务
+│   │   └── ...
 │   └── chains/                # LangChain 链
+├── scripts/
+│   └── test_sse_monitor.py    # SSE监控测试脚本
+├── docs/
+│   └── sse_monitoring_guide.md # SSE监控使用指南
 ├── .env.example               # 环境变量示例
 ├── requirements.txt           # Python 依赖
 ├── Dockerfile                 # Docker 配置
