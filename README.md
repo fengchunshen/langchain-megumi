@@ -4,11 +4,10 @@
 
 ## 技术栈
 
-- **FastAPI**: 高性能 API 框架
-- **LangChain (LCEL & LangGraph)**: AI 任务编排
-- **Pydantic**: 数据模型和验证
-- **Httpx**: 异步 HTTP 客户端
-- **Docker**: 容器化部署
+- **FastAPI**: 异步 Web 框架
+- **LangGraph**: 状态图工作流编排
+- **Pydantic v2**: 数据验证与配置管理
+- **httpx**: 异步 HTTP 客户端
 
 ## 快速开始
 
@@ -61,214 +60,98 @@ docker run -d \
   ruoyi-ai-service
 ```
 
-## API 端点
+## DeepSearch 研究引擎
 
-- `POST /api/v1/drawing/generate` - 生成图片
-- `POST /api/v1/ocr/recognize` - OCR 文字识别
-- `POST /api/v1/fastgpt/chat` - FastGPT 对话
-- `GET /api/v1/fastgpt/history/{chat_id}` - 获取聊天历史
-- `POST /api/v1/agent/orchestrate` - 任务编排
-- `POST /api/v1/analysis/analyze-node` - 分析产业节点并生成标签画像
-- `POST /api/v1/analysis/analyze-solution` - 分析解决方案并生成相关标签
-- `POST /api/v1/analysis/analyze-company-tags` - 分析企业经营范围并生成相关标签
-- `GET /api/v1/analysis/health` - AI分析服务健康检查
-- `POST /api/v1/deepsearch/run` - DeepSearch 深度研究流程
-- `POST /api/v1/deepsearch/run/stream` - DeepSearch 流式接口（支持SSE）
+DeepSearch 是基于 LangGraph 状态图的多阶段自适应研究系统，通过迭代式信息检索与质量评估生成带引用的研究报告。
 
-## 🔍 SSE监控端点
+### 核心算法
 
-### 监控API
+**状态图工作流**：采用 LangGraph 构建有向状态图，节点间通过条件边实现动态路由。
 
-- `GET /api/v1/monitor/sse/status` - 获取SSE连接状态和统计信息
-- `GET /api/v1/monitor/sse/active-users` - 获取当前活跃的SSE用户列表
-- `GET /api/v1/monitor/system/health` - 系统健康检查
+**研究流程**：
+1. **研究计划生成**：基于查询主题分解子问题与研究路径
+2. **查询生成**：根据研究计划生成多维度搜索查询
+3. **网络搜索**：并行执行查询并聚合结果
+4. **反思评估**：判断信息充分性，决定是否进入下一轮迭代
+5. **质量增强**：内容质量评估 → 事实验证 → 相关性评估 → 总结优化
+6. **答案生成**：自动插入引用标记并生成结构化报告
 
-### 监控功能特性
+**自适应迭代**：通过反思节点评估知识缺口，动态决定是否继续搜索循环，最大循环次数可配置。
 
-- **实时连接跟踪**: 监控所有活跃的SSE连接
-- **性能指标统计**: 连接成功率、平均响应时间、错误率等
-- **自动清理**: 定期清理过期连接（默认30分钟超时）
-- **健康状态评估**: 基于预设阈值评估系统健康状况
+**多维度质量评估**：
+- 内容质量：完整性、准确性、深度
+- 事实验证：关键事实的交叉验证
+- 相关性评估：信息与查询主题的匹配度
+- 总结优化：结构化与可读性优化
 
-### 监控示例
+**流式输出**：支持 Server-Sent Events (SSE) 实时推送研究进度，包含 15 种事件类型，覆盖研究全流程。
 
-```bash
-# 查看SSE连接状态
-curl http://localhost:8000/api/v1/monitor/sse/status
+**连接管理**：基于 `asyncio.Event` 实现连接级取消机制，支持客户端主动断开时的资源清理。
 
-# 查看活跃用户
-curl http://localhost:8000/api/v1/monitor/sse/active-users
+**模型降级**：Gemini API 异常时自动降级至 Qwen3Max，保证服务可用性。
 
-# 系统健康检查
-curl http://localhost:8000/api/v1/monitor/system/health
-```
+### API 端点
 
-### 监控响应示例
+- `POST /api/v1/deepsearch/run` - 同步执行研究流程
+- `POST /api/v1/deepsearch/run/stream` - 流式执行（SSE）
+
+### 请求参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| query | string | 研究主题，1-8000 字符 |
+| initial_search_query_count | int | 初始查询数量，1-10，默认 3 |
+| max_research_loops | int | 最大迭代次数，1-5，默认 3 |
+| reasoning_model | string | 推理模型覆盖（可选） |
+| report_format | enum | 报告格式：formal/casual |
+
+### 响应结构
 
 ```json
 {
   "success": true,
-  "data": {
-    "active_connections": 5,
-    "total_connections": 156,
-    "success_rate": 91.03,
-    "average_duration": 180.5,
-    "connection_details": [
-      {
-        "connection_id": "sse_123_1730865000",
-        "user_id": null,
-        "status": "active",
-        "duration": 45.2,
-        "events_sent": 8
-      }
-    ]
+  "answer": "研究结论文本，包含引用标记 [1][2]...",
+  "markdown_report": "完整 Markdown 格式报告",
+  "sources": [
+    {
+      "label": "数据源标题",
+      "short_url": "[1]",
+      "value": "https://example.com"
+    }
+  ],
+  "all_sources": [...],
+  "metadata": {
+    "research_loop_count": 3,
+    "number_of_queries": 8,
+    "number_of_sources": 15,
+    "total_sources_found": 23
   }
 }
 ```
 
-## /analyze-node 接口使用说明
+### 流式事件类型
 
-### 接口地址
-```
-POST /api/v1/analysis/analyze-node
-```
+- `started` - 流程启动
+- `research_plan` - 研究计划生成
+- `query_generated` - 查询生成
+- `web_searching` - 网络搜索中
+- `web_result` - 搜索结果
+- `reflection` - 反思评估
+- `quality_assessment` - 质量评估
+- `fact_verification` - 事实验证
+- `relevance_assessment` - 相关性评估
+- `optimization` - 总结优化
+- `progress` - 进度更新
+- `report_generated` - 报告生成完成
+- `completed` - 流程完成
+- `cancelled` - 流程取消
+- `error` - 错误事件
 
-### 请求参数
+### 使用示例
 
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| nodeName | string | 是 | 节点名称，例如："光伏电池" |
-| parentProfile | object | 否 | 父节点信息，例如：{"name": "光伏产业"} |
-| siblingsProfiles | array | 否 | 兄弟节点信息列表，例如：[{"name": "光伏组件"}, {"name": "光伏材料"}] |
-
-### 请求示例
-
-#### cURL
-```bash
-curl -X POST "http://localhost:8000/api/v1/analysis/analyze-node" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "nodeName": "TOPCon电池",
-    "parentProfile": {
-      "name": "光伏产业"
-    },
-    "siblingsProfiles": [
-      {"name": "PERC电池"},
-      {"name": "HJT电池"}
-    ]
-  }'
-```
-
-#### Python (requests)
-```python
-import requests
-
-url = "http://localhost:8000/api/v1/analysis/analyze-node"
-payload = {
-    "nodeName": "TOPCon电池",
-    "parentProfile": {
-        "name": "光伏产业"
-    },
-    "siblingsProfiles": [
-        {"name": "PERC电池"},
-        {"name": "HJT电池"}
-    ]
-}
-
-response = requests.post(url, json=payload)
-print(response.json())
-```
-
-#### JavaScript (fetch)
-```javascript
-fetch('http://localhost:8000/api/v1/analysis/analyze-node', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({
-    nodeName: 'TOPCon电池',
-    parentProfile: {
-      name: '光伏产业'
-    },
-    siblingsProfiles: [
-      {name: 'PERC电池'},
-      {name: 'HJT电池'}
-    ]
-  })
-})
-.then(response => response.json())
-.then(data => console.log(data));
-```
-
-### 响应示例
-
-```json
-{
-  "success": true,
-  "data": {
-    "coreTechnologies": [
-      {"name": "TOPCon技术", "weight": 0.9},
-      {"name": "隧穿氧化层", "weight": 0.8},
-      {"name": "N型硅片", "weight": 0.7}
-    ],
-    "applicationScenarios": [
-      {"name": "高效光伏组件", "weight": 0.8},
-      {"name": "分布式光伏", "weight": 0.7}
-    ]
-  },
-  "error": null,
-  "timestamp": "2025-01-01T12:00:00"
-}
-```
-
-### 响应字段说明
-
-| 字段名 | 类型 | 说明 |
-|--------|------|------|
-| success | boolean | 是否成功 |
-| data | object | 分析结果数据，包含分类的标签和权重 |
-| data.coreTechnologies | array | 核心技术标签列表 |
-| data.coreTechnologies[].name | string | 标签名称 |
-| data.coreTechnologies[].weight | number | 标签权重（0-1之间） |
-| data.applicationScenarios | array | 应用场景标签列表 |
-| error | string | 错误信息（如果有） |
-| timestamp | string | 响应时间戳 |
-
-### 注意事项
-
-1. 确保已配置 `DEEPSEEK_API_KEY` 环境变量
-2. 节点名称应简洁明了，建议2-8个字符
-3. 父节点和兄弟节点信息有助于生成更精准的标签
-4. 接口使用异步处理，建议设置合适的超时时间
-
-## /deepsearch/run 接口使用说明
-
-### 接口地址
-```
-POST /api/v1/deepsearch/run
-```
-
-### 接口说明
-
-DeepSearch 是一个基于 Gemini 的深度研究流程，能够自动执行多轮搜索、分析和总结，返回带引用的研究结果。
-
-### 请求参数
-
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| query | string | 是 | 研究主题/问题，长度1-8000字符 |
-| initial_search_query_count | int | 否 | 初始搜索 Query 数量，范围1-10，不传则使用默认配置 |
-| max_research_loops | int | 否 | 最大研究循环次数，范围1-10，不传则使用默认配置 |
-| reasoning_model | string | 否 | 用于反思/总结的模型覆盖，不传则使用默认配置 |
-
-### 请求示例
-
-#### cURL
 ```bash
 curl -X POST "http://localhost:8000/api/v1/deepsearch/run" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
   -d '{
     "query": "TOPCon电池技术的最新发展及应用前景",
     "initial_search_query_count": 3,
@@ -276,155 +159,48 @@ curl -X POST "http://localhost:8000/api/v1/deepsearch/run" \
   }'
 ```
 
-#### Python (requests)
-```python
-import requests
-
-url = "http://localhost:8000/api/v1/deepsearch/run"
-headers = {
-    "Content-Type": "application/json",
-    "X-API-Key": "your_api_key"
-}
-payload = {
-    "query": "TOPCon电池技术的最新发展及应用前景",
-    "initial_search_query_count": 3,
-    "max_research_loops": 5
-}
-
-response = requests.post(url, json=payload, headers=headers)
-print(response.json())
-```
-
-#### JavaScript (fetch)
-```javascript
-fetch('http://localhost:8000/api/v1/deepsearch/run', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-API-Key': 'your_api_key'
-  },
-  body: JSON.stringify({
-    query: 'TOPCon电池技术的最新发展及应用前景',
-    initial_search_query_count: 3,
-    max_research_loops: 5
-  })
-})
-.then(response => response.json())
-.then(data => console.log(data));
-```
-
-### 响应示例
-
-```json
-{
-  "success": true,
-  "answer": "TOPCon（隧穿氧化层钝化接触）电池技术是当前光伏行业的重要发展方向之一...\n[1][2]",
-  "sources": [
-    {
-      "label": "TOPCon技术概述",
-      "short_url": "[1]",
-      "value": "https://example.com/article1"
-    },
-    {
-      "label": "TOPCon市场分析",
-      "short_url": "[2]",
-      "value": "https://example.com/article2"
-    }
-  ],
-  "metadata": {
-    "research_loop_count": 3,
-    "number_of_queries": 8
-  },
-  "message": null
-}
-```
-
-### 响应字段说明
-
-| 字段名 | 类型 | 说明 |
-|--------|------|------|
-| success | boolean | 是否成功 |
-| answer | string | 最终带引用的研究结果，正文中包含引用标记如 [1][2] |
-| sources | array | 被使用的数据源列表 |
-| sources[].label | string | 数据源标题/标签 |
-| sources[].short_url | string | 短链引用标记（如 [1]），用于正文中引用 |
-| sources[].value | string | 原始 URL |
-| metadata | object | 附加元数据 |
-| metadata.research_loop_count | int | 实际执行的研究循环次数 |
-| metadata.number_of_queries | int | 搜索查询总数 |
-| message | string | 附加消息（如果有） |
-
-### 注意事项
-
-1. 确保已配置 `GEMINI_API_KEY` 和 `GEMINI_API_URL` 环境变量
-2. 确保已配置 `BOCHA_API_KEY` 环境变量（用于搜索功能）
-3. 需要 API Key 认证，请求头中需包含 `X-API-Key`
-4. 接口执行时间较长（可能几分钟），建议设置较长的超时时间（建议600秒）
-5. query 字段应明确描述研究主题，有助于生成更精准的搜索结果
-6. initial_search_query_count 和 max_research_loops 参数用于控制搜索深度，可根据需求调整
-
-## OCR 配置说明
-
-### 环境变量配置
-
-项目使用阿里云 DashScope（通义千问）OCR 服务。在 `.env` 文件中配置以下参数：
+### 环境配置
 
 ```bash
-# DashScope (阿里云通义千问) OCR 配置
-DASHSCOPE_API_KEY=sk-your_dashscope_api_key_here          # DashScope API 密钥（必填）
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1  # DashScope API 地址（必填）
-DASHSCOPE_OCR_MODEL=qwen-vl-ocr-latest                    # OCR 模型名称（可选，默认：qwen-vl-ocr-latest）
-```
-
-### 配置示例
-
-```bash
-DASHSCOPE_API_KEY=sk-0b7d3b1046744800bb1c989ee16ba576
+GEMINI_API_KEY=your_gemini_key
+GEMINI_API_URL=https://generativelanguage.googleapis.com/v1
+BOCHA_API_KEY=your_bocha_key  # 用于网络搜索
+DASHSCOPE_API_KEY=your_dashscope_key  # 降级备用
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_OCR_MODEL=qwen-vl-ocr-latest
 ```
 
-### 配置验证
+## 其他 API 端点
 
-配置完成后，重启服务，OCR 服务会自动从环境变量加载配置。如果配置不完整，调用 OCR API 时会返回错误。
+- `POST /api/v1/drawing/generate` - 图片生成
+- `POST /api/v1/ocr/recognize` - OCR 识别
+- `POST /api/v1/fastgpt/chat` - FastGPT 对话
+- `POST /api/v1/agent/orchestrate` - 任务编排
+- `POST /api/v1/analysis/analyze-node` - 产业节点分析
+- `GET /api/v1/monitor/sse/status` - SSE 连接监控
 
-### 获取 DashScope API Key
 
-1. 访问 [阿里云 DashScope 控制台](https://dashscope.console.aliyun.com/)
-2. 创建 API Key
-3. 将 API Key 配置到 `.env` 文件中
 
 ## 项目结构
 
 ```
-jingboAI_python/
-├── app/
-│   ├── main.py                # FastAPI 应用主入口
-│   ├── apis/                  # API 路由层
-│   │   ├── deps.py            # FastAPI 依赖项
-│   │   └── v1/                 # API v1 版本
-│   │       ├── endpoint_drawing.py
-│   │       ├── endpoint_ocr.py
-│   │       ├── endpoint_fastgpt.py
-│   │       ├── endpoint_agent.py
-│   │       ├── endpoint_analysis.py
-│   │       ├── endpoint_deepsearch.py
-│   │       └── endpoint_monitor.py  # 系统监控API
-│   ├── core/                  # 核心配置
-│   │   ├── config.py          # 配置管理
-│   │   └── security.py        # 安全相关
-│   ├── models/                # Pydantic 数据模型
-│   ├── services/              # 业务逻辑层
-│   │   ├── sse_monitor.py     # SSE监控服务
-│   │   └── ...
-│   └── chains/                # LangChain 链
-├── scripts/
-│   └── test_sse_monitor.py    # SSE监控测试脚本
-├── docs/
-│   └── sse_monitoring_guide.md # SSE监控使用指南
-├── .env.example               # 环境变量示例
-├── requirements.txt           # Python 依赖
-├── Dockerfile                 # Docker 配置
-└── README.md                  # 项目说明文档
-
+app/
+├── main.py                    # FastAPI 应用入口
+├── apis/                      # API 路由层
+│   └── v1/
+│       └── endpoint_deepsearch.py  # DeepSearch 端点
+├── core/                      # 核心配置
+│   ├── config.py             # Pydantic Settings 配置管理
+│   └── security.py           # 安全认证
+├── models/                    # Pydantic 数据模型
+│   └── deepsearch.py         # DeepSearch 请求/响应模型
+├── services/                  # 业务逻辑层
+│   ├── deepsearch_service.py # DeepSearch 服务封装
+│   ├── deepsearch_engine.py  # LangGraph 状态图引擎
+│   ├── deepsearch_prompts.py # 提示词模板
+│   ├── deepsearch_types.py   # 类型定义
+│   ├── deepsearch_utils.py   # 工具函数
+│   ├── report_generator.py   # 报告生成器
+│   ├── web_scraper.py        # 网页抓取
+│   └── sse_monitor.py        # SSE 连接监控
+└── chains/                    # LangChain 链定义
 ```
