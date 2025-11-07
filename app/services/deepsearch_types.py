@@ -42,7 +42,7 @@ class SearchQueryList(BaseModel):
 class Reflection(BaseModel):
     is_sufficient: bool = Field(description="Whether the provided summaries are sufficient to answer the user's question.", alias="is_sufficient")
     knowledge_gap: str = Field(description="A description of what information is missing or needs clarification.", alias="knowledge_gap")
-    follow_up_queries: List[str] = Field(description="A list of follow-up queries to address the knowledge gap.", alias="follow_up_queries")
+    unanswered_questions: List[str] = Field(description="A list of unanswered research questions from the original research plan.", alias="unanswered_questions")
     
     model_config = {
         "populate_by_name": True,  # 允许使用字段名或别名

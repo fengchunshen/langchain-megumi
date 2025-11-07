@@ -45,12 +45,11 @@ research_plan_instructions = """你是一名专业的高级研究分析师。你
 
 query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
 
-Instructions:
-- Always prefer a single search query, only add another query if the original question requests multiple aspects or elements and one query is not enough.
-- Each query should focus on one specific aspect of the original question.
+**运行模式 (Operation Mode):**
+{mode_instruction}
+
+通用指令 (General Instructions):
 - Don't produce more than {number_queries} queries.
-- Queries should be diverse, if the topic is broad, generate more than 1 query.
-- Don't generate multiple similar queries, 1 is enough.
 - Query should ensure that the most current information is gathered. The current date is {current_date}.
 
 研究方案 (Research Plan):
@@ -93,13 +92,16 @@ reflection_instructions = """你是一名严谨的研究评估专家，负责判
 研究主题："{research_topic}"
 当前研究轮次：第 {loop_count} 轮
 
+**原始研究计划 (Research Plan)：**
+{research_plan}
+
 核心任务：
-判断已收集的信息是否足以生成一份高质量、完整的调查研究报告。
+对照上述研究计划（特别是 research_questions），判断已收集的信息是否足以生成一份高质量、完整的调查研究报告。
 
 判断标准（必须同时满足以下条件才能设为 true）：
 
 1. **核心问题覆盖**（必须）：
-   - 用户提出的主要问题和关键需求都有明确答案
+   - 研究计划中列出的所有 research_questions 都已得到充分回答
    - 不存在明显的信息空白或核心问题未回答的情况
 
 2. **关键数据完整**（必须）：
@@ -125,23 +127,28 @@ reflection_instructions = """你是一名严谨的研究评估专家，负责判
 信息不足的典型情况（应设为 false）：
 - 只有概述性信息，缺少具体细节
 - 关键数据缺失（如金额、比例、条件等）
-- 用户问题的某些方面完全没有覆盖
+- 研究计划中的某些问题完全没有覆盖
 - 信息过于分散，难以形成完整报告
 - 存在明显的矛盾或不一致需要进一步澄清
+
+**未回答问题识别（重要）**：
+- 请逐条对照研究计划中的 research_questions，识别哪些问题尚未得到充分回答
+- 将这些未回答的问题**原文**列入 unanswered_questions 字段
+- 保持问题文本与研究计划完全一致，不要改写或简化
 
 输出格式：
 ```json
 {{
     "is_sufficient": true/false,
     "knowledge_gap": "如果为false，具体说明缺少什么关键信息",
-    "follow_up_queries": ["如果为false，生成1-3个具体的后续搜索查询"]
+    "unanswered_questions": ["未回答问题1（原文）", "未回答问题2（原文）", ...]
 }}
 ```
 
 当前已收集的研究摘要：
 {summaries}
 
-请严格按照上述标准评估，不要过于宽松也不要过于严格。输出JSON格式的判断结果。"""
+请严格按照上述标准评估，对照研究计划逐条审视，输出JSON格式的判断结果。"""
 
 
 answer_instructions = """你是一名在顶级咨询公司（如麦肯锡、贝恩）任职的资深行业分析师。你的任务是撰写一份专业、严谨、数据驱动的深度研究报告。

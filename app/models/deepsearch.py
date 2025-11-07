@@ -67,7 +67,7 @@ class ReflectionEventData(BaseModel):
     loop_count: int = Field(..., description="当前循环次数")
     is_sufficient: bool = Field(..., description="信息是否充足")
     knowledge_gap: Optional[str] = Field(default=None, description="知识差距描述")
-    follow_up_queries: List[str] = Field(default_factory=list, description="后续查询列表")
+    unanswered_questions: List[str] = Field(default_factory=list, description="未回答的研究问题列表")
 
 
 class DeepSearchRequest(BaseModel):

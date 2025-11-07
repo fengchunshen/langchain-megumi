@@ -326,6 +326,7 @@ class OverallState(TypedDict, total=False):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    unanswered_questions: Annotated[List, operator.add]  # 未回答的研究问题列表
     # 质量增强相关字段
     content_quality: Dict[str, Any]
     fact_verification: Dict[str, Any]
@@ -338,7 +339,7 @@ class OverallState(TypedDict, total=False):
 class ReflectionState(TypedDict):
     is_sufficient: bool
     knowledge_gap: str
-    follow_up_queries: Annotated[List, operator.add]
+    unanswered_questions: Annotated[List, operator.add]  # 替换 follow_up_queries
     research_loop_count: int
     number_of_ran_queries: int
     max_research_loops: int  # 添加最大研究循环次数字段
@@ -424,23 +425,20 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     check_cancellation_and_raise(connection_id)
     
     logger.info("【节点: generate_query】开始生成搜索查询...")
-    initial_count = state.get("initial_search_query_count")
-    if initial_count is None:
-        initial_count = 3
-        state["initial_search_query_count"] = initial_count
     
-    logger.info(f"【节点: generate_query】初始搜索查询数量: {initial_count}")
+    # 判断运行模式：首次运行 vs 针对性运行
+    unanswered_questions = state.get("unanswered_questions", [])
+    is_targeted_mode = len(unanswered_questions) > 0
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     logger.info(f"【节点: generate_query】使用模型: {reasoning_model}")
-
+    
     research_topic = get_research_topic(state["messages"])
     research_plan = state.get("research_plan")
     
     # 将方案格式化为字符串
     plan_str = "无特定方案，请直接分析研究主题。"
     if research_plan and research_plan.sub_topics:
-        logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
         plan_str = f"主题: {research_plan.research_topic}\n\n关键子主题和研究问题:\n"
         
         # 按子主题分组研究问题
@@ -458,19 +456,63 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
                 plan_str += f"   {i}.{j}. {question_text}\n"
         
         plan_str += f"\n理由: {research_plan.rationale}"
-    else:
-        logger.warning("【节点: generate_query】未找到研究方案，将仅基于主题生成查询")
     
+    # 根据模式设置不同的提示词
+    if is_targeted_mode:
+        # 针对性模式：仅针对未回答的问题生成查询
+        logger.info(f"【节点: generate_query】运行模式: 针对性（Targeted）")
+        logger.info(f"【节点: generate_query】未回答问题数量: {len(unanswered_questions)}")
+        for idx, question in enumerate(unanswered_questions[:3], 1):
+            logger.info(f"【节点: generate_query】  未回答问题 {idx}: {question[:100]}...")
+        
+        # 针对性模式：每个问题生成1-2个查询，总数不超过配置的上限
+        max_queries = min(len(unanswered_questions) * 2, state.get("initial_search_query_count", 3))
+        
+        unanswered_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(unanswered_questions)])
+        mode_instruction = f"""**针对性模式 (Targeted Mode):**
+- 当前存在 {len(unanswered_questions)} 个未充分回答的研究问题
+- 你的任务是**仅针对以下未回答问题**生成精准的搜索查询
+- 每个问题生成 1-2 个查询，避免重复
+- 查询应直接服务于回答这些具体问题
+- 不要生成超出此清单范围的查询
+
+未回答的问题清单：
+{unanswered_text}
+"""
+    else:
+        # 首次运行模式：基于完整研究计划生成初始查询
+        logger.info(f"【节点: generate_query】运行模式: 首次（Initial）")
+        initial_count = state.get("initial_search_query_count")
+        if initial_count is None:
+            initial_count = 3
+            state["initial_search_query_count"] = initial_count
+        logger.info(f"【节点: generate_query】初始搜索查询数量: {initial_count}")
+        if research_plan:
+            logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
+        
+        max_queries = initial_count
+        mode_instruction = """**首次运行模式 (Initial Mode):**
+- 这是第一次生成搜索查询
+- 请基于完整的研究计划 (Research Plan) 生成多样化的初始查询
+- 查询应覆盖研究计划中的各个子主题和关键问题
+- Always prefer a single search query, only add another query if the original question requests multiple aspects or elements and one query is not enough.
+- Each query should focus on one specific aspect of the original question.
+- Queries should be diverse, if the topic is broad, generate more than 1 query.
+- Don't generate multiple similar queries, 1 is enough.
+"""
+    
+    logger.info(f"【节点: generate_query】目标查询数量: {max_queries}")
     logger.info(f"【节点: generate_query】研究主题: {research_topic[:200]}...")
     
     formatted_prompt = query_writer_instructions.format(
         current_date=get_current_date(),
         research_topic=research_topic,
         research_plan=plan_str,
-        number_queries=initial_count,
+        mode_instruction=mode_instruction,
+        number_queries=max_queries,
     )
     
-    logger.info("【节点: generate_query】调用 LLM (基于方案) 生成查询...")
+    logger.info(f"【节点: generate_query】调用 LLM 生成查询...")
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="generate_query",
@@ -774,13 +816,28 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
     search_queries = state.get("search_query", [])
     logger.info(f"【节点: reflection】当前已有 {len(web_research_results)} 个搜索结果，{len(search_queries)} 个搜索查询")
 
+    # 获取研究计划并格式化
+    research_plan = state.get("research_plan")
+    plan_str = "无特定研究计划"
+    if research_plan:
+        plan_str = f"研究主题: {research_plan.research_topic}\n\n"
+        plan_str += "子主题:\n"
+        for i, sub_topic in enumerate(research_plan.sub_topics, 1):
+            plan_str += f"{i}. {sub_topic}\n"
+        plan_str += "\n研究问题 (Research Questions):\n"
+        for i, question in enumerate(research_plan.research_questions, 1):
+            plan_str += f"{i}. {question}\n"
+        plan_str += f"\n理由: {research_plan.rationale}"
+        logger.info(f"【节点: reflection】使用研究计划进行对照评估，包含 {len(research_plan.research_questions)} 个问题")
+
     formatted_prompt = reflection_instructions.format(
         research_topic=get_research_topic(state["messages"]),
+        research_plan=plan_str,
         loop_count=loop_count,
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
     
-    logger.info("【节点: reflection】调用 LLM 进行反思评估...")
+    logger.info("【节点: reflection】调用 LLM 进行反思评估（对照研究计划）...")
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="reflection",
@@ -799,23 +856,23 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
     else:
         logger.info(f"【节点: reflection】  ⚠️  评估结果: 信息不足，需要继续研究")
         logger.info(f"【节点: reflection】  知识缺口: {result.knowledge_gap[:200] if result.knowledge_gap else 'N/A'}...")
-        follow_up_count = len(result.follow_up_queries) if result.follow_up_queries else 0
-        logger.info(f"【节点: reflection】  后续查询数量: {follow_up_count}")
-        if follow_up_count > 0:
-            for idx, query in enumerate(result.follow_up_queries[:3], 1):  # 只记录前3个
-                logger.info(f"【节点: reflection】    后续查询 {idx}: {query[:100]}...")
+        unanswered_count = len(result.unanswered_questions) if result.unanswered_questions else 0
+        logger.info(f"【节点: reflection】  未回答问题数量: {unanswered_count}")
+        if unanswered_count > 0:
+            for idx, question in enumerate(result.unanswered_questions[:3], 1):  # 只记录前3个
+                logger.info(f"【节点: reflection】    未回答问题 {idx}: {question[:100]}...")
 
     return {
         "is_sufficient": result.is_sufficient,
         "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
+        "unanswered_questions": result.unanswered_questions,
         "research_loop_count": state["research_loop_count"],
         "number_of_ran_queries": len(state["search_query"]),
         "max_research_loops": state.get("max_research_loops", 5),  # 传递最大循环次数，默认5
     }
 
 
-def evaluate_research(state: ReflectionState, config: RunnableConfig) -> OverallState:
+def evaluate_research(state: ReflectionState, config: RunnableConfig) -> str:
     max_research_loops = state.get("max_research_loops", 5)  # 默认5次循环
     loop_count = state["research_loop_count"]
     is_sufficient = state["is_sufficient"]
@@ -833,20 +890,11 @@ def evaluate_research(state: ReflectionState, config: RunnableConfig) -> Overall
         logger.info(f"【节点: evaluate_research】➡️  下一步: 基于现有信息生成报告")
         return "assess_content_quality"
     else:
-        follow_up_queries = state.get("follow_up_queries", [])
-        follow_up_count = len(follow_up_queries)
+        unanswered_questions = state.get("unanswered_questions", [])
+        unanswered_count = len(unanswered_questions)
         logger.info(f"【节点: evaluate_research】🔄 决策: 信息不足，继续第 {loop_count + 1} 轮调查")
-        logger.info(f"【节点: evaluate_research】➡️  下一步: 分发 {follow_up_count} 个后续查询到 web_research 节点")
-        return [
-            Send(
-                "web_research",
-                {
-                    "search_query": follow_up_query,
-                    "id": state["number_of_ran_queries"] + int(idx),
-                },
-            )
-            for idx, follow_up_query in enumerate(state["follow_up_queries"])
-        ]
+        logger.info(f"【节点: evaluate_research】➡️  下一步: 生成针对 {unanswered_count} 个未回答问题的新查询")
+        return "generate_query"
 
 
 async def assess_content_quality(state: OverallState, config: RunnableConfig):
@@ -1312,7 +1360,7 @@ _builder.add_edge(START, "generate_research_plan")
 _builder.add_edge("generate_research_plan", "generate_query")
 _builder.add_conditional_edges("generate_query", continue_to_web_research, ["web_research"])
 _builder.add_edge("web_research", "reflection")
-_builder.add_conditional_edges("reflection", evaluate_research, ["web_research", "assess_content_quality"])
+_builder.add_conditional_edges("reflection", evaluate_research, ["generate_query", "assess_content_quality"])
 
 # 质量增强流程
 _builder.add_edge("assess_content_quality", "verify_facts")

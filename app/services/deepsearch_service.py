@@ -228,7 +228,7 @@ class DeepSearchService:
                                     loop_count=node_output.get("research_loop_count", 0),
                                     is_sufficient=node_output.get("is_sufficient", False),
                                     knowledge_gap=node_output.get("knowledge_gap"),
-                                    follow_up_queries=node_output.get("follow_up_queries", [])
+                                    unanswered_questions=node_output.get("unanswered_questions", [])
                                 ).model_dump(),
                                 "反思评估完成"
                             )
