@@ -25,7 +25,8 @@ class ReportGenerator:
         fact_verification: Dict[str, Any],
         relevance_assessment: Dict[str, Any],
         summary_optimization: Dict[str, Any],
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        include_quality_assurance: bool = False
     ) -> str:
         """
         生成正式公文格式的研究报告.
@@ -40,6 +41,7 @@ class ReportGenerator:
             relevance_assessment: 相关性评估数据
             summary_optimization: 总结优化数据
             metadata: 元数据
+            include_quality_assurance: 是否在报告中包含“质量保障”章节，默认不包含
             
         Returns:
             str: Markdown格式的正式报告
@@ -55,6 +57,26 @@ class ReportGenerator:
         
         # 构建报告标题
         research_topic = research_plan.research_topic if research_plan else query
+        
+        # 可选的“质量保障”章节（对外用户报告默认隐藏）
+        quality_section = ""
+        if include_quality_assurance:
+            quality_section = f"""## 五、质量保障
+
+### 5.1 质量评估指标
+
+{self._format_quality_metrics(content_quality, relevance_assessment)}
+
+### 5.2 事实验证结果
+
+{self._format_fact_verification(fact_verification, sources)}
+
+### 5.3 可信度评级
+
+{self._format_confidence_rating(summary_optimization, content_quality)}
+
+---
+"""
         
         markdown = f"""# {research_topic} 研究报告
 
@@ -123,21 +145,7 @@ class ReportGenerator:
 
 ---
 
-## 五、质量保障
-
-### 5.1 质量评估指标
-
-{self._format_quality_metrics(content_quality, relevance_assessment)}
-
-### 5.2 事实验证结果
-
-{self._format_fact_verification(fact_verification, sources)}
-
-### 5.3 可信度评级
-
-{self._format_confidence_rating(summary_optimization, content_quality)}
-
----
+{quality_section}
 
 ## 六、参考文献
 
