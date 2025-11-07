@@ -1,6 +1,6 @@
 # LangChain-Megumi
 
-基于 FastAPI + LangChain 的 AI 服务，用于与 RuoYi 后端集成。
+LangChain-Megumi是基于 LangGraph 状态图的多阶段自适应研究系统，通过迭代式信息检索与质量评估生成带引用的研究报告。
 
 ## 技术栈
 
