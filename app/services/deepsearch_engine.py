@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, TypedDict, Callable, TypeVar
+import asyncio
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -50,12 +51,46 @@ logger = logging.getLogger(__name__)
 # 全局变量：跟踪是否已降级到 Qwen3Max
 _gemini_degraded = False
 
+# 全局取消状态管理
+_connection_cancellations: Dict[str, bool] = {}
+_cancellations_lock = asyncio.Lock()
+
 
 def reset_degradation_status():
     """重置降级状态（用于测试或新请求开始时）."""
     global _gemini_degraded
     _gemini_degraded = False
     logger.info("【降级状态】已重置，将重新尝试 Gemini")
+
+
+async def set_connection_cancelled(connection_id: str):
+    """标记连接为已取消."""
+    global _connection_cancellations
+    async with _cancellations_lock:
+        _connection_cancellations[connection_id] = True
+    logger.info(f"【取消状态】连接 {connection_id} 已被标记为取消")
+
+
+def is_connection_cancelled(connection_id: str) -> bool:
+    """检查连接是否已被取消."""
+    global _connection_cancellations
+    return _connection_cancellations.get(connection_id, False)
+
+
+async def cleanup_connection_cancellation(connection_id: str):
+    """清理连接的取消状态."""
+    global _connection_cancellations
+    async with _cancellations_lock:
+        if connection_id in _connection_cancellations:
+            del _connection_cancellations[connection_id]
+    logger.info(f"【取消状态】连接 {connection_id} 的取消状态已清理")
+
+
+def check_cancellation_and_raise(connection_id: Optional[str] = None):
+    """检查取消状态，如果被取消则抛出CancelledError."""
+    if connection_id and is_connection_cancelled(connection_id):
+        logger.info(f"【取消检查】连接 {connection_id} 已被取消，停止执行")
+        raise asyncio.CancelledError(f"连接 {connection_id} 已被取消")
 
 
 def get_qwen_base_url() -> str:
@@ -136,6 +171,7 @@ def invoke_llm_with_fallback(
     temperature: float = 0.5,
     qwen_model: str = None,
     structured_output_type: Any = None,
+    connection_id: Optional[str] = None,
     **llm_kwargs
 ) -> T:
     """
@@ -151,6 +187,7 @@ def invoke_llm_with_fallback(
         temperature: 温度参数
         qwen_model: Qwen3Max 模型名称（默认使用配置中的 DASHSCOPE_CHAT_MODEL）
         structured_output_type: 结构化输出类型（如果提供，会自动调用 with_structured_output）
+        connection_id: 连接ID，用于取消检查
         **llm_kwargs: 传递给 ChatOpenAI 的其他参数
         
     Returns:
@@ -158,8 +195,12 @@ def invoke_llm_with_fallback(
         
     Raises:
         Exception: 如果两种模型都失败，抛出最后一个异常
+        asyncio.CancelledError: 如果连接被取消
     """
     global _gemini_degraded
+    
+    # 在每次重试前检查取消状态
+    check_cancellation_and_raise(connection_id)
     
     if qwen_model is None:
         qwen_model = settings.DASHSCOPE_CHAT_MODEL
@@ -168,6 +209,9 @@ def invoke_llm_with_fallback(
     if _gemini_degraded:
         logger.info(f"【节点: {node_name}】已降级，直接使用 Qwen3Max ({qwen_model})...")
         try:
+            # 再次检查取消状态
+            check_cancellation_and_raise(connection_id)
+            
             llm = create_llm_with_fallback(
                 model=qwen_model,
                 temperature=temperature,
@@ -180,6 +224,8 @@ def invoke_llm_with_fallback(
                 llm = llm.with_structured_output(structured_output_type)
             
             result = invoke_func(llm)
+            # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
+            check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
             return result
         except Exception as e:
@@ -190,58 +236,69 @@ def invoke_llm_with_fallback(
     last_error = None
     for attempt in range(2):  # 第一次 + 1次重试 = 总共2次尝试
         try:
-            if attempt == 0:
-                logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
-            else:
-                logger.warning(f"【节点: {node_name}】Gemini 第 {attempt} 次重试...")
+            # 每次重试前都检查取消状态
+            check_cancellation_and_raise(connection_id)
             
-            llm = create_llm_with_fallback(
+            base_url = get_gemini_base_url()
+            api_key = settings.GEMINI_API_KEY
+            logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
+            
+            # 每次重试都重新创建LLM实例
+            llm = ChatOpenAI(
                 model=gemini_model,
                 temperature=temperature,
-                use_gemini=True,
-                max_retries=0  # 在包装函数中手动处理重试
+                api_key=api_key,
+                base_url=base_url,
+                timeout=settings.API_TIMEOUT,
+                max_retries=1,  # 内部不再重试，由外层控制
+                **llm_kwargs
             )
             
             # 如果指定了结构化输出类型，使用 with_structured_output
             if structured_output_type is not None:
                 llm = llm.with_structured_output(structured_output_type)
             
+            logger.info(f"【节点: {node_name}】Gemini 调用开始...")
             result = invoke_func(llm)
+            # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
+            check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Gemini 调用成功")
             return result
             
         except Exception as e:
             last_error = e
-            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/2): {str(e)}")
-            if attempt < 1:  # 还有重试机会
-                continue
+            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/2): {str(e)}", exc_info=False)
+            
+            if attempt == 0:
+                logger.info(f"【节点: {node_name}】Gemini 第 1 次重试...")
+                # 重试前检查取消状态
+                check_cancellation_and_raise(connection_id)
             else:
-                # 所有重试都失败，切换到 Qwen3Max 并设置降级标志
-                logger.warning(f"【节点: {node_name}】Gemini 重试1次后仍失败，切换到 Qwen3Max ({qwen_model})...")
-                logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
+                # 所有重试都失败了，切换到 Qwen3Max
+                logger.warning(f"【节点: {node_name}】Gemini 重试{attempt}次后仍失败，切换到 Qwen3Max ({qwen_model})...")
+                
+                # 切换前检查取消状态
+                check_cancellation_and_raise(connection_id)
+                
+                # 设置全局降级标志
                 _gemini_degraded = True
-                break
+                logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
+                
+                # 重新递归调用，这次直接使用 Qwen3Max
+                return invoke_llm_with_fallback(
+                    invoke_func=invoke_func,
+                    node_name=node_name,
+                    gemini_model=gemini_model,
+                    temperature=temperature,
+                    qwen_model=qwen_model,
+                    structured_output_type=structured_output_type,
+                    connection_id=connection_id,
+                    **llm_kwargs
+                )
     
-    # 切换到 Qwen3Max
-    try:
-        llm = create_llm_with_fallback(
-            model=qwen_model,
-            temperature=temperature,
-            use_gemini=False,
-            max_retries=2
-        )
-        
-        # 如果指定了结构化输出类型，使用 with_structured_output
-        if structured_output_type is not None:
-            llm = llm.with_structured_output(structured_output_type)
-        
-        result = invoke_func(llm)
-        logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
-        return result
-    except Exception as e:
-        logger.error(f"【节点: {node_name}】Qwen3Max 调用也失败: {str(e)}", exc_info=True)
-        # 如果 Qwen3Max 也失败，抛出最后一个异常
-        raise e
+    # 如果到这里，说明所有尝试都失败了
+    logger.error(f"【节点: {node_name}】所有模型调用都失败，最后错误: {last_error}")
+    raise last_error
 
 
 class OverallState(TypedDict, total=False):
@@ -291,7 +348,19 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     """
     生成研究方案节点。
     """
+    # 获取connection_id用于取消检查，安全处理config对象
+    connection_id = None
+    if config:
+        # 处理config可能是RunnableConfig对象或字典的情况
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
     logger.info("【节点: generate_research_plan】开始生成研究方案...")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
@@ -309,19 +378,37 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
             node_name="generate_research_plan",
             gemini_model=reasoning_model,
             temperature=0.3,  # 从0.5降低到0.3，让输出更严谨详细
-            structured_output_type=ResearchPlan
+            structured_output_type=ResearchPlan,
+            connection_id=connection_id
         )
+        # 返回后再次检查取消，避免后续日志继续输出
+        check_cancellation_and_raise(connection_id)
         logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
         logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
         for idx, sub_topic in enumerate(plan.sub_topics, 1):
             logger.info(f"【节点: generate_research_plan】  子主题 {idx}: {sub_topic}")
         return {"research_plan": plan}
+    except asyncio.CancelledError:
+        # 主动取消时不记录错误，向上抛出以尽快停止图执行
+        logger.info("【节点: generate_research_plan】检测到取消，终止节点执行")
+        raise
     except Exception as e:
         logger.error(f"【节点: generate_research_plan】生成方案失败: {e}", exc_info=True)
         return {"research_plan": None}
 
 
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info("【节点: generate_query】开始生成搜索查询...")
     initial_count = state.get("initial_search_query_count")
     if initial_count is None:
@@ -375,8 +462,11 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
         node_name="generate_query",
         gemini_model=reasoning_model,
         temperature=1.0,
-        structured_output_type=SearchQueryList
+        structured_output_type=SearchQueryList,
+        connection_id=connection_id
     )
+    # 返回后再次检查取消，避免后续日志继续输出
+    check_cancellation_and_raise(connection_id)
     
     query_count = len(result.query) if result.query else 0
     logger.info(f"【节点: generate_query】成功生成 {query_count} 个搜索查询")
@@ -467,6 +557,17 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     使用博查搜索 API 进行网页研究。
     """
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     search_query = state["search_query"]
     search_id = state["id"]
     
@@ -507,7 +608,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         invoke_func=lambda llm: llm.invoke(full_prompt),
         node_name="web_research",
         gemini_model=settings.GEMINI_MODEL,
-        temperature=0
+        temperature=0,
+        connection_id=connection_id
     )
     logger.info(f"【节点: web_research】LLM 总结完成，响应长度: {len(llm_response.content)} 字符")
     
@@ -530,6 +632,17 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
 
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
     loop_count = state["research_loop_count"]
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
@@ -553,7 +666,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         node_name="reflection",
         gemini_model=reasoning_model,
         temperature=1.0,
-        structured_output_type=Reflection
+        structured_output_type=Reflection,
+        connection_id=connection_id
     )
 
     logger.info(f"【节点: reflection】=== 信息充足性评估结果 ===")
@@ -617,6 +731,17 @@ def evaluate_research(state: ReflectionState, config: RunnableConfig) -> Overall
 
 def assess_content_quality(state: OverallState, config: RunnableConfig):
     """内容质量评估节点。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info(f"【节点: assess_content_quality】开始内容质量评估")
     
     # 合并所有研究内容
@@ -637,7 +762,8 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
         node_name="assess_content_quality",
         gemini_model=reasoning_model,
         temperature=0.3,
-        structured_output_type=ContentQualityAssessment
+        structured_output_type=ContentQualityAssessment,
+        connection_id=connection_id
     )
     
     logger.info(f"【节点: assess_content_quality】质量评分: {result.quality_score}")
@@ -655,6 +781,17 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
 
 def verify_facts(state: OverallState, config: RunnableConfig):
     """事实验证节点。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info(f"【节点: verify_facts】开始事实验证")
     
     # 合并所有研究内容
@@ -685,7 +822,9 @@ def verify_facts(state: OverallState, config: RunnableConfig):
         invoke_func=invoke_with_method,
         node_name="verify_facts",
         gemini_model=reasoning_model,
-        temperature=0.1
+        temperature=0.1,
+        structured_output_type=FactVerification,
+        connection_id=connection_id
     )
     
     logger.info(f"【节点: verify_facts】验证置信度: {result.confidence_score}")
@@ -714,6 +853,17 @@ def verify_facts(state: OverallState, config: RunnableConfig):
 
 def assess_relevance(state: OverallState, config: RunnableConfig):
     """相关性评估节点。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info(f"【节点: assess_relevance】开始相关性评估")
     
     # 合并所有研究内容
@@ -734,7 +884,8 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
         node_name="assess_relevance",
         gemini_model=reasoning_model,
         temperature=0.2,
-        structured_output_type=RelevanceAssessment
+        structured_output_type=RelevanceAssessment,
+        connection_id=connection_id
     )
     
     logger.info(f"【节点: assess_relevance】相关性评分: {result.relevance_score}")
@@ -753,6 +904,17 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
 
 def optimize_summary(state: OverallState, config: RunnableConfig):
     """摘要优化节点。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info(f"【节点: optimize_summary】开始摘要优化")
     
     # 获取原始摘要
@@ -778,7 +940,8 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
         node_name="optimize_summary",
         gemini_model=reasoning_model,
         temperature=0.3,
-        structured_output_type=SummaryOptimization
+        structured_output_type=SummaryOptimization,
+        connection_id=connection_id
     )
     
     # 计算最终置信度评分
@@ -804,6 +967,17 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
 
 def generate_verification_report(state: OverallState, config: RunnableConfig):
     """生成综合验证报告节点。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     logger.info(f"【节点: generate_verification_report】开始生成验证报告")
     
     # 生成综合验证报告
@@ -851,6 +1025,17 @@ def generate_verification_report(state: OverallState, config: RunnableConfig):
 
 def finalize_answer(state: OverallState, config: RunnableConfig):
     """生成最终答案，返回高度围绕用户提问的调查研究报告。"""
+    # 获取connection_id用于取消检查
+    connection_id = None
+    if config:
+        if hasattr(config, 'configurable') and config.configurable:
+            connection_id = config.configurable.get("connection_id")
+        elif isinstance(config, dict):
+            connection_id = config.get("configurable", {}).get("connection_id")
+    
+    # 检查取消状态
+    check_cancellation_and_raise(connection_id)
+    
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
     logger.info(f"【节点: finalize_answer】开始生成最终答案")
@@ -901,7 +1086,8 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         invoke_func=lambda llm: llm.invoke(formatted_prompt),
         node_name="finalize_answer",
         gemini_model=reasoning_model,
-        temperature=0.2
+        temperature=0.2,
+        connection_id=connection_id
     )
     final_report = result.content  # 这就是纯 Markdown 报告
     

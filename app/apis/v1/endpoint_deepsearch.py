@@ -11,6 +11,7 @@ from app.models.deepsearch import (
 from app.services.deepsearch_service import deepsearch_service
 from app.services.sse_monitor import sse_monitor
 import logging
+import asyncio
 
 
 logger = logging.getLogger(__name__)
@@ -85,9 +86,23 @@ async def run_deepsearch_stream(
     
     async def event_generator():
         """事件生成器."""
+        # 导入取消函数
+        from app.services.deepsearch_engine import set_connection_cancelled, cleanup_connection_cancellation
+        
         try:
-            # 使用监控的迭代器包装原始服务
-            async for event in deepsearch_service.run_stream(request_data):
+            # 使用监控的迭代器包装原始服务，传递connection_id
+            async for event in deepsearch_service.run_stream(request_data, connection_id):
+                # **关键改进：主动检查客户端连接状态**
+                if await request.is_disconnected():
+                    logger.info(f"检测到客户端断开连接: {connection_id}")
+                    # 立即标记取消状态
+                    await set_connection_cancelled(connection_id)
+                    await deepsearch_service.cancel_connection(connection_id)
+                    await sse_monitor.error_connection(connection_id, "客户端主动断开连接")
+                    # 清理取消状态
+                    await cleanup_connection_cancellation(connection_id)
+                    return
+                
                 # 更新监控信息
                 await sse_monitor.update_activity(connection_id)
                 
@@ -97,6 +112,21 @@ async def run_deepsearch_stream(
             
             # 标记连接完成
             await sse_monitor.complete_connection(connection_id)
+            
+        except asyncio.CancelledError:
+            # 客户端主动断开连接（备用方案）
+            logger.info(f"捕获到CancelledError: {connection_id}")
+            
+            # 通知服务和引擎取消处理流程
+            await set_connection_cancelled(connection_id)
+            await deepsearch_service.cancel_connection(connection_id)
+            await sse_monitor.error_connection(connection_id, "客户端主动断开连接")
+            
+            # 清理取消状态
+            await cleanup_connection_cancellation(connection_id)
+            
+            # 不需要重新抛出CancelledError，让FastAPI处理
+            return
             
         except Exception as e:
             error_msg = str(e)
@@ -115,6 +145,10 @@ async def run_deepsearch_stream(
             )
             yield f"event: error\n"
             yield f"data: {error_event.model_dump_json()}\n\n"
+        finally:
+            # 确保清理工作总是执行
+            await cleanup_connection_cancellation(connection_id)
+            logger.info(f"事件生成器清理完成: {connection_id}")
     
     return StreamingResponse(
         event_generator(),

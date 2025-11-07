@@ -26,6 +26,7 @@ class DeepSearchEventType(str, Enum):
     PROGRESS = "progress"                        # 进度更新
     REPORT_GENERATED = "report_generated"        # 报告生成完成
     COMPLETED = "completed"                      # 流程完成
+    CANCELLED = "cancelled"                      # 流程取消
     ERROR = "error"                              # 错误事件
 
 

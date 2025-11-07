@@ -1,6 +1,7 @@
 """DeepSearch 服务 - 使用内置引擎运行研究流程。"""
 from typing import Any, Dict, AsyncGenerator
 import logging
+import asyncio
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -28,7 +29,34 @@ class DeepSearchService:
     
     def __init__(self):
         """初始化服务。"""
-        self.sequenceNumber = 0
+        self.sequence_number = 0
+        # 添加连接取消事件字典，用于管理不同连接的取消状态
+        self._connection_cancellations: Dict[str, asyncio.Event] = {}
+        self._cancellations_lock = asyncio.Lock()
+    
+    async def _get_cancellation_event(self, connection_id: str) -> asyncio.Event:
+        """获取指定连接的取消事件对象。"""
+        async with self._cancellations_lock:
+            if connection_id not in self._connection_cancellations:
+                self._connection_cancellations[connection_id] = asyncio.Event()
+            return self._connection_cancellations[connection_id]
+    
+    async def cancel_connection(self, connection_id: str):
+        """取消指定连接的处理流程。"""
+        async with self._cancellations_lock:
+            if connection_id in self._connection_cancellations:
+                self._connection_cancellations[connection_id].set()
+                logger.info(f"已取消连接 {connection_id} 的处理流程")
+    
+    async def _cleanup_cancellation(self, connection_id: str):
+        """清理指定连接的取消事件对象。"""
+        async with self._cancellations_lock:
+            if connection_id in self._connection_cancellations:
+                del self._connection_cancellations[connection_id]
+    
+    def _check_cancellation(self, cancellation_event: asyncio.Event) -> bool:
+        """检查是否已被取消。"""
+        return cancellation_event.is_set()
 
     async def run(self, request: DeepSearchRequest) -> DeepSearchResponse:
         try:
@@ -72,18 +100,25 @@ class DeepSearchService:
     
     async def run_stream(
         self, 
-        request: DeepSearchRequest
+        request: DeepSearchRequest,
+        connection_id: str = None
     ) -> AsyncGenerator[DeepSearchEvent, None]:
         """
         流式执行 DeepSearch，实时推送事件.
         
         Args:
             request: DeepSearch请求
+            connection_id: SSE连接ID，用于取消检查
             
         Yields:
             DeepSearchEvent: 研究过程事件
         """
-        self.sequenceNumber = 0
+        self.sequence_number = 0
+        
+        # 获取取消事件对象
+        cancellation_event = None
+        if connection_id:
+            cancellation_event = await self._get_cancellation_event(connection_id)
         
         try:
             # 重置降级状态，每次新请求都从 Gemini 开始尝试
@@ -96,16 +131,47 @@ class DeepSearchService:
                 "研究流程已启动"
             )
             
+            # 检查是否已被取消
+            if cancellation_event and self._check_cancellation(cancellation_event):
+                yield self._create_event(
+                    DeepSearchEventType.CANCELLED,
+                    {"message": "用户取消了研究流程"},
+                    "研究流程已取消"
+                )
+                return
+            
             # 构建初始状态
             state = self._build_initial_state(request)
             
             # 跟踪最终状态是否获取
             final_state = None
             
-            # 使用 astream 流式执行
-            async for chunk in graph.astream(state, config=RunnableConfig()):
+            # 使用 astream 流式执行，传递connection_id到config
+            config = RunnableConfig(configurable={"connection_id": connection_id}) if connection_id else RunnableConfig()
+            
+            async for chunk in graph.astream(state, config=config):
+                # **优先检查取消状态**
+                if cancellation_event and self._check_cancellation(cancellation_event):
+                    logger.info(f"检测到取消信号 [连接: {connection_id}]，停止流式执行")
+                    yield self._create_event(
+                        DeepSearchEventType.CANCELLED,
+                        {"message": "用户取消了研究流程"},
+                        "研究流程已取消"
+                    )
+                    return
+                
                 # 解析每个步骤的输出
                 for node_name, node_output in chunk.items():
+                    # **在处理每个节点输出前再次检查取消状态**
+                    if cancellation_event and self._check_cancellation(cancellation_event):
+                        logger.info(f"在处理节点 {node_name} 时检测到取消信号 [连接: {connection_id}]")
+                        yield self._create_event(
+                            DeepSearchEventType.CANCELLED,
+                            {"message": "用户取消了研究流程"},
+                            "研究流程已取消"
+                        )
+                        return
+                    
                     logger.info(f"节点 {node_name} 输出: {list(node_output.keys())}")
                     
                     # 研究计划生成
@@ -239,7 +305,8 @@ class DeepSearchService:
             else:
                 # 如果流式执行没有到达最终节点，则重新获取最终状态
                 logger.warning("流式执行未完成，使用重新获取的最终状态")
-                final_state = await graph.ainvoke(state, config=RunnableConfig())
+                config = RunnableConfig(configurable={"connection_id": connection_id}) if connection_id else RunnableConfig()
+                final_state = await graph.ainvoke(state, config=config)
                 response = self._build_response(request, final_state)
             
             # 发送完成事件
@@ -256,6 +323,10 @@ class DeepSearchService:
                 {"error": str(e)},
                 f"执行失败: {str(e)}"
             )
+        finally:
+            # 清理取消事件对象
+            if connection_id:
+                await self._cleanup_cancellation(connection_id)
     
     def _build_initial_state(self, request: DeepSearchRequest) -> Dict[str, Any]:
         """构建初始状态."""
@@ -373,11 +444,11 @@ class DeepSearchService:
         message: str
     ) -> DeepSearchEvent:
         """创建事件对象."""
-        self.sequenceNumber += 1
+        self.sequence_number += 1
         return DeepSearchEvent(
             event_type=event_type,
             timestamp=datetime.now().isoformat(),
-            sequence_number=self.sequenceNumber,
+            sequence_number=self.sequence_number,
             data=data,
             message=message
         )
