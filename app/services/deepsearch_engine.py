@@ -1106,17 +1106,79 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: finalize_answer】LLM 生成完成，报告长度: {len(final_report)} 字符")
     
-    # 处理数据源引用
+    # 处理数据源引用（改进版：扫描引用编号并生成参考来源列表）
     logger.info("【节点: finalize_answer】处理数据源引用...")
-    unique_sources: List[Dict[str, Any]] = []
-    enhanced_content = final_report
+    import re
     
+    # 1. 扫描报告中的所有引用编号 [1], [2], [3] 等
+    citation_pattern = re.compile(r'\[(\d+)\]')
+    found_citations = set(citation_pattern.findall(final_report))
+    logger.info(f"【节点: finalize_answer】扫描到 {len(found_citations)} 个引用编号: {sorted(found_citations, key=int)}")
+    
+    # 2. 将 shortUrl 替换为实际 URL
+    enhanced_content = final_report
     for source in sources_gathered:
         if source["shortUrl"] in enhanced_content:
             enhanced_content = enhanced_content.replace(source["shortUrl"], source["value"])
-            unique_sources.append(source)
     
-    logger.info(f"【节点: finalize_answer】最终答案包含 {len(unique_sources)} 个被引用的数据源")
+    # 3. 构建引用编号到来源的映射（基于顺序）
+    citation_to_source = {}
+    unique_sources: List[Dict[str, Any]] = []
+    
+    # 按引用编号排序来源（基于 shortUrl 中的编号）
+    def extract_citation_num(source: Dict[str, Any]) -> int:
+        """从 shortUrl 中提取引用编号"""
+        short_url = source.get("shortUrl", "")
+        # shortUrl 格式: https://vertexaisearch.cloud.google.com/id/{search_id}-{idx}
+        match = re.search(r'/id/\d+-(\d+)$', short_url)
+        if match:
+            return int(match.group(1))
+        return 999999  # 如果无法提取，放到最后
+    
+    # 按照引用编号排序来源
+    sorted_sources = sorted(sources_gathered, key=extract_citation_num)
+    
+    # 为每个来源分配引用编号（从1开始）
+    for idx, source in enumerate(sorted_sources, start=1):
+        citation_num = str(idx)
+        citation_to_source[citation_num] = source
+        unique_sources.append(source)
+    
+    logger.info(f"【节点: finalize_answer】共有 {len(unique_sources)} 个数据源")
+    
+    # 4. 在报告末尾添加"参考来源"列表（如果报告中有引用编号）
+    if found_citations:
+        logger.info("【节点: finalize_answer】在报告末尾添加参考来源列表...")
+        
+        # 检查报告是否已有"参考来源"、"引用"、"来源" 等标题
+        has_references = bool(re.search(r'#+\s*(参考来源|引用|来源|参考资料|References)', enhanced_content, re.IGNORECASE))
+        
+        if not has_references:
+            # 如果没有，添加参考来源列表
+            enhanced_content += "\n\n---\n\n## 参考来源\n\n"
+            
+            # 按引用编号排序
+            sorted_citations = sorted([int(c) for c in found_citations])
+            
+            for citation_num in sorted_citations:
+                citation_str = str(citation_num)
+                if citation_str in citation_to_source:
+                    source = citation_to_source[citation_str]
+                    label = source.get("label", f"来源 {citation_num}")
+                    url = source.get("value", "")
+                    enhanced_content += f"{citation_num}. [{label}]({url})\n"
+                else:
+                    # 引用编号在报告中存在，但没有对应的来源
+                    logger.warning(f"【节点: finalize_answer】引用编号 [{citation_num}] 没有对应的来源")
+                    enhanced_content += f"{citation_num}. 来源未找到\n"
+            
+            logger.info(f"【节点: finalize_answer】已添加 {len(sorted_citations)} 个参考来源")
+        else:
+            logger.info("【节点: finalize_answer】报告已包含参考来源部分，跳过添加")
+    else:
+        logger.info("【节点: finalize_answer】报告中未找到引用编号，跳过添加参考来源列表")
+    
+    logger.info(f"【节点: finalize_answer】最终答案包含 {len(unique_sources)} 个数据源")
     logger.info(f"【节点: finalize_answer】最终内容长度: {len(enhanced_content)} 字符")
     logger.info(f"【节点: finalize_answer】节点执行完成")
 

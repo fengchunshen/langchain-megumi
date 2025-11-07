@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
 
 
@@ -120,6 +120,46 @@ def get_citations(response: Any, resolved_urls_map: Dict[str, str]) -> List[Dict
                     pass
         citations.append(citation)
     return citations
+
+
+def deduplicate_sources_by_url_and_title(
+    sources: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    按 URL+标题组合去重来源列表，避免不同短链/相同落地页的重复。
+    
+    参数:
+    - sources: 来源列表，每个来源包含 label（标题）、value（URL）、shortUrl
+    
+    返回:
+    - 去重后的来源列表
+    """
+    if not sources:
+        return []
+    
+    seen_combinations: Set[Tuple[str, str]] = set()
+    deduplicated: List[Dict[str, Any]] = []
+    
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        
+        url = source.get("value", "")
+        label = source.get("label", "")
+        
+        # 标准化处理
+        normalized_url = url.rstrip('/') if url else ""
+        normalized_label = " ".join(label.lower().split()) if label else ""
+        
+        # 创建组合键
+        combination_key = (normalized_url, normalized_label)
+        
+        # 如果组合键未见过，添加到结果列表
+        if url and combination_key not in seen_combinations:
+            seen_combinations.add(combination_key)
+            deduplicated.append(source)
+    
+    return deduplicated
 
 
 def get_citations_from_bocha(

@@ -363,16 +363,26 @@ class ReportGenerator:
         return formatted
     
     def _format_references(self, sources: List[Dict[str, Any]]) -> str:
-        """格式化参考文献."""
+        """
+        格式化参考文献（支持 URL+标题去重后的引用列表）.
+        
+        Args:
+            sources: 已去重的来源信息列表
+            
+        Returns:
+            str: 格式化的参考文献列表
+        """
         if not sources:
             return "（本次研究未引用外部文献）"
         
         formatted = ""
+        access_time = datetime.now().strftime("%Y年%m月%d日")
+        
         for idx, source in enumerate(sources, 1):
             title = source.get("label", "未知来源")
             url = source.get("value", "#")
-            access_time = datetime.now().strftime("%Y年%m月%d日")
             
+            # 格式化为标准的参考文献格式
             formatted += f"[{idx}] {title}. 访问链接：{url}. 访问时间：{access_time}\n\n"
         
         return formatted.strip()

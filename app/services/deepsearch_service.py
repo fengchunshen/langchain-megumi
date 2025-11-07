@@ -350,29 +350,51 @@ class DeepSearchService:
         if messages:
             answer_text = messages[-1].content or ""
         
-        # 提取被引用的来源
+        # 提取被引用的来源（使用 URL+标题组合去重）
         sources_list = []
         sources_gathered = result_state.get("sources_gathered") or []
+        seen_source_combinations = set()
         for source in sources_gathered:
             if isinstance(source, dict):
-                sources_list.append(
-                    DeepSource(
-                        label=source.get("label"),
-                        short_url=source.get("shortUrl"),
-                        value=source.get("value")
+                url = source.get("value")
+                label = source.get("label", "")
+                
+                # 创建 URL+标题的组合键（标准化处理）
+                normalized_url = url.rstrip('/') if url else ""
+                normalized_label = " ".join(label.lower().split()) if label else ""
+                combination_key = (normalized_url, normalized_label)
+                
+                if url and combination_key not in seen_source_combinations:
+                    seen_source_combinations.add(combination_key)
+                    sources_list.append(
+                        DeepSource(
+                            label=source.get("label"),
+                            short_url=source.get("shortUrl"),
+                            value=source.get("value")
+                        )
                     )
-                )
         
         # 提取所有搜索到的来源
         all_sources_list = []
         all_sources_gathered = result_state.get("all_sources_gathered") or []
-        # 使用字典去重，避免重复的URL
-        seen_urls = set()
+        # 使用 URL+标题组合去重，避免不同短链/相同落地页或相同URL但不同标题的重复
+        seen_combinations = set()
         for source in all_sources_gathered:
             if isinstance(source, dict):
                 url = source.get("value")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
+                label = source.get("label", "")
+                
+                # 创建 URL+标题的组合键（标准化处理）
+                # 标准化 URL：移除末尾的 / 和 URL 参数（可选）
+                normalized_url = url.rstrip('/') if url else ""
+                # 标准化标题：转小写，去除多余空格
+                normalized_label = " ".join(label.lower().split()) if label else ""
+                
+                # 组合键：URL + 标题
+                combination_key = (normalized_url, normalized_label)
+                
+                if url and combination_key not in seen_combinations:
+                    seen_combinations.add(combination_key)
                     all_sources_list.append(
                         DeepSource(
                             label=source.get("label"),
