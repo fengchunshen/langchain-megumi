@@ -319,6 +319,7 @@ class OverallState(TypedDict, total=False):
     messages: Annotated[List, add_messages]
     research_plan: Optional[ResearchPlan]
     search_query: Annotated[List, operator.add]
+    new_search_query: List[str]  # 本轮新生成的查询（不累加）
     web_research_result: Annotated[List, operator.add]
     sources_gathered: Annotated[List, operator.add]
     all_sources_gathered: Annotated[List, operator.add]  # 所有搜索到的资源（包括未被引用的）
@@ -326,7 +327,7 @@ class OverallState(TypedDict, total=False):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
-    unanswered_questions: Annotated[List, operator.add]  # 未回答的研究问题列表
+    unanswered_questions: List[str]  # 未回答的研究问题列表（每轮替换，不累加）
     # 质量增强相关字段
     content_quality: Dict[str, Any]
     fact_verification: Dict[str, Any]
@@ -339,7 +340,7 @@ class OverallState(TypedDict, total=False):
 class ReflectionState(TypedDict):
     is_sufficient: bool
     knowledge_gap: str
-    unanswered_questions: Annotated[List, operator.add]  # 替换 follow_up_queries
+    unanswered_questions: List[str]  # 每轮替换，不累加
     research_loop_count: int
     number_of_ran_queries: int
     max_research_loops: int  # 添加最大研究循环次数字段
@@ -352,6 +353,7 @@ class Query(TypedDict):
 
 class QueryGenerationState(TypedDict):
     search_query: List[str]  # 实际上是字符串列表，不是 Query 对象列表
+    new_search_query: List[str]  # 本轮新生成的查询（不累加）
 
 
 class WebSearchState(TypedDict):
@@ -529,15 +531,18 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     for idx, query_item in enumerate(result.query[:5], 1):  # 只记录前5个
         logger.info(f"【节点: generate_query】  查询 {idx}: {query_item[:100]}...")
     
-    return {"search_query": result.query}
+    # 返回两个字段：search_query 用于累积（历史记录），new_search_query 用于本轮执行
+    return {"search_query": result.query, "new_search_query": result.query}
 
 
 def continue_to_web_research(state: QueryGenerationState):
-    query_count = len(state["search_query"])
+    # 只处理本轮新生成的查询，避免重复执行历史查询
+    new_queries = state.get("new_search_query", [])
+    query_count = len(new_queries)
     logger.info(f"【节点: continue_to_web_research】准备分发 {query_count} 个搜索任务到 web_research 节点")
     return [
         Send("web_research", {"search_query": search_query, "id": int(idx)})
-        for idx, search_query in enumerate(state["search_query"])
+        for idx, search_query in enumerate(new_queries)
     ]
 
 
