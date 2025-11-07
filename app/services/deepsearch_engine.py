@@ -36,6 +36,7 @@ from .deepsearch_utils import (
     resolve_urls,
     format_bocha_search_results,
 )
+from .web_scraper import scrape_webpages, clean_and_truncate
 from .deepsearch_types import (
     SearchQueryList, 
     Reflection,
@@ -569,7 +570,7 @@ async def bocha_web_search(query: str, count: int = 10) -> Dict[str, Any]:
 
 async def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
-    使用博查搜索 API 进行网页研究（异步版本）。
+    使用博查搜索 API 进行网页研究，并进行深度抓取和正文提取（异步版本）。
     """
     # 获取connection_id用于取消检查
     connection_id = None
@@ -603,6 +604,78 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         for idx, page in enumerate(webpages[:3], 1):
             logger.info(f"【节点: web_research】  {idx}. {page.get('name', 'N/A')[:100]}")
     
+    # ========== 深度抓取逻辑开始 ==========
+    
+    # 选取 Top-K 网页进行深度抓取
+    top_k = min(settings.WEB_SCRAPE_TOP_K, len(webpages))
+    top_pages = webpages[:top_k]
+    top_urls = [p.get("url") for p in top_pages if p.get("url")]
+    
+    logger.info(f"【节点: web_research】准备深度抓取 Top-{top_k} 网页...")
+    
+    # 并发抓取网页并提取正文
+    deep_docs = []
+    if top_urls:
+        try:
+            scraped_results = await scrape_webpages(
+                urls=top_urls,
+                timeout=settings.WEB_SCRAPE_TIMEOUT,
+                concurrency=settings.WEB_SCRAPE_CONCURRENCY,
+                max_per_doc_chars=settings.WEB_SCRAPE_MAX_PER_DOC_CHARS,
+                user_agent=settings.WEB_SCRAPE_USER_AGENT,
+            )
+            
+            # 组装深度文档列表（保持编号与 top_pages 一致）
+            url_to_text = {url: text for url, text in scraped_results}
+            
+            for i, page in enumerate(top_pages, start=1):
+                url = page.get("url", "")
+                if url in url_to_text:
+                    title = page.get("name", f"来源{i}")
+                    text = url_to_text[url]
+                    deep_docs.append((i, title, url, text))
+            
+            logger.info(f"【节点: web_research】成功深度抓取 {len(deep_docs)}/{top_k} 个网页")
+            
+        except Exception as e:
+            logger.error(f"【节点: web_research】深度抓取失败: {e}", exc_info=True)
+    
+    # 构建 LLM 上下文
+    context_for_llm = ""
+    
+    if deep_docs:
+        # 使用深度抓取的正文作为上下文
+        deep_context_parts = []
+        for idx, title, url, text in deep_docs:
+            deep_context_parts.append(
+                f"[{idx}] 标题: {title}\n"
+                f"URL: {url}\n"
+                f"正文:\n{text}\n"
+                f"---"
+            )
+        deep_context = "\n".join(deep_context_parts)
+        
+        # 控制总长度
+        deep_context = clean_and_truncate(
+            deep_context, 
+            settings.WEB_SCRAPE_MAX_TOTAL_CHARS
+        )
+        context_for_llm = deep_context
+        
+        logger.info(
+            f"【节点: web_research】使用深度正文作为上下文，"
+            f"总长度: {len(context_for_llm)} 字符"
+        )
+    else:
+        # 回退到博查搜索的摘要
+        context_for_llm = formatted_text
+        logger.warning(
+            f"【节点: web_research】深度抓取失败或无结果，"
+            f"回退使用博查搜索摘要"
+        )
+    
+    # ========== 深度抓取逻辑结束 ==========
+    
     # 使用 Gemini 对搜索结果进行总结和整理
     logger.info(f"【节点: web_research】开始使用 LLM 总结搜索结果...")
     formatted_prompt = web_searcher_instructions.format(
@@ -613,7 +686,8 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     # 将搜索结果添加到提示词中，并提示 LLM 使用引用编号
     search_context = (
         f"\n\n搜索查询: {search_query}\n"
-        f"搜索结果（请在你的回答中使用引用编号 [1], [2] 等来引用这些来源）:\n{formatted_text}"
+        f"仅基于以下网页正文内容进行严谨总结，并在每条事实后使用 [编号] 标注来源：\n"
+        f"{context_for_llm}"
     )
     full_prompt = formatted_prompt + search_context
 
@@ -629,17 +703,49 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     
     # 处理引用和来源
     logger.info(f"【节点: web_research】开始处理引用和来源...")
-    resolved_urls = resolve_urls(webpages, search_id)
-    citations = get_citations_from_bocha(webpages, resolved_urls, llm_response.content)
-    modified_text = insert_citation_markers(llm_response.content, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
     
-    logger.info(f"【节点: web_research】处理完成，生成 {len(citations)} 个引用，{len(sources_gathered)} 个数据源片段")
+    # 如果有深度抓取的结果，使用 top_pages；否则使用全部 webpages
+    pages_for_citation = top_pages if deep_docs else webpages
+    
+    resolved_urls = resolve_urls(pages_for_citation, search_id)
+    citations = get_citations_from_bocha(
+        pages_for_citation, 
+        resolved_urls, 
+        llm_response.content
+    )
+    modified_text = insert_citation_markers(llm_response.content, citations)
+    
+    # sources_gathered: 仅包含深度抓取的来源（用于引用）
+    sources_gathered = [
+        item for citation in citations 
+        for item in citation["segments"]
+    ]
+    
+    # all_sources_gathered: 包含所有搜索到的来源（包括非 top-k）
+    all_resolved_urls = resolve_urls(webpages, search_id)
+    all_sources = []
+    for page in webpages:
+        url = page.get("url", "")
+        if url:
+            title = page.get("name", "")
+            site_name = page.get("siteName", "")
+            all_sources.append({
+                "label": title[:50] if title else site_name[:50] if site_name else "来源",
+                "shortUrl": all_resolved_urls.get(url, url),
+                "value": url,
+            })
+    
+    logger.info(
+        f"【节点: web_research】处理完成，"
+        f"生成 {len(citations)} 个引用，"
+        f"{len(sources_gathered)} 个深度来源，"
+        f"{len(all_sources)} 个候选来源"
+    )
     logger.info(f"【节点: web_research】搜索任务 ID={search_id} 完成")
 
     return {
         "sources_gathered": sources_gathered,
-        "all_sources_gathered": sources_gathered,  # 保存所有搜索到的资源
+        "all_sources_gathered": all_sources,  # 保存所有搜索到的资源
         "search_query": [search_query],
         "web_research_result": [modified_text],
     }
