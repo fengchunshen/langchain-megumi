@@ -6,7 +6,7 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
-from app.services.deepsearch_engine import graph, reset_degradation_status
+from app.services.deepsearch_engine import graph, reset_degradation_status, is_connection_cancelled
 from app.services.report_generator import report_generator
 from app.models.deepsearch import (
     DeepSearchRequest, 
@@ -30,33 +30,7 @@ class DeepSearchService:
     def __init__(self):
         """初始化服务。"""
         self.sequence_number = 0
-        # 添加连接取消事件字典，用于管理不同连接的取消状态
-        self._connection_cancellations: Dict[str, asyncio.Event] = {}
-        self._cancellations_lock = asyncio.Lock()
-    
-    async def _get_cancellation_event(self, connection_id: str) -> asyncio.Event:
-        """获取指定连接的取消事件对象。"""
-        async with self._cancellations_lock:
-            if connection_id not in self._connection_cancellations:
-                self._connection_cancellations[connection_id] = asyncio.Event()
-            return self._connection_cancellations[connection_id]
-    
-    async def cancel_connection(self, connection_id: str):
-        """取消指定连接的处理流程。"""
-        async with self._cancellations_lock:
-            if connection_id in self._connection_cancellations:
-                self._connection_cancellations[connection_id].set()
-                logger.info(f"已取消连接 {connection_id} 的处理流程")
-    
-    async def _cleanup_cancellation(self, connection_id: str):
-        """清理指定连接的取消事件对象。"""
-        async with self._cancellations_lock:
-            if connection_id in self._connection_cancellations:
-                del self._connection_cancellations[connection_id]
-    
-    def _check_cancellation(self, cancellation_event: asyncio.Event) -> bool:
-        """检查是否已被取消。"""
-        return cancellation_event.is_set()
+        
 
     async def run(self, request: DeepSearchRequest) -> DeepSearchResponse:
         try:
@@ -115,10 +89,7 @@ class DeepSearchService:
         """
         self.sequence_number = 0
         
-        # 获取取消事件对象
-        cancellation_event = None
-        if connection_id:
-            cancellation_event = await self._get_cancellation_event(connection_id)
+        # 采用引擎的统一取消状态（通过 connection_id 查询）
         
         try:
             # 重置降级状态，每次新请求都从 Gemini 开始尝试
@@ -131,8 +102,8 @@ class DeepSearchService:
                 "研究流程已启动"
             )
             
-            # 检查是否已被取消
-            if cancellation_event and self._check_cancellation(cancellation_event):
+            # 检查是否已被取消（统一由 engine 管理）
+            if connection_id and is_connection_cancelled(connection_id):
                 yield self._create_event(
                     DeepSearchEventType.CANCELLED,
                     {"message": "用户取消了研究流程"},
@@ -145,13 +116,15 @@ class DeepSearchService:
             
             # 跟踪最终状态是否获取
             final_state = None
+            # 跟踪是否已发送 WEB_SEARCHING 事件
+            web_searching_sent = False
             
             # 使用 astream 流式执行，传递connection_id到config
             config = RunnableConfig(configurable={"connection_id": connection_id}) if connection_id else RunnableConfig()
             
             async for chunk in graph.astream(state, config=config):
                 # **优先检查取消状态**
-                if cancellation_event and self._check_cancellation(cancellation_event):
+                if connection_id and is_connection_cancelled(connection_id):
                     logger.info(f"检测到取消信号 [连接: {connection_id}]，停止流式执行")
                     yield self._create_event(
                         DeepSearchEventType.CANCELLED,
@@ -163,7 +136,7 @@ class DeepSearchService:
                 # 解析每个步骤的输出
                 for node_name, node_output in chunk.items():
                     # **在处理每个节点输出前再次检查取消状态**
-                    if cancellation_event and self._check_cancellation(cancellation_event):
+                    if connection_id and is_connection_cancelled(connection_id):
                         logger.info(f"在处理节点 {node_name} 时检测到取消信号 [连接: {connection_id}]")
                         yield self._create_event(
                             DeepSearchEventType.CANCELLED,
@@ -178,16 +151,19 @@ class DeepSearchService:
                     if node_name == "generate_research_plan":
                         if "research_plan" in node_output:
                             plan = node_output["research_plan"]
-                            yield self._create_event(
-                                DeepSearchEventType.RESEARCH_PLAN,
-                                ResearchPlanEventData(
-                                    research_topic=plan.research_topic,
-                                    sub_topics=plan.sub_topics,
-                                    research_questions=plan.research_questions,
-                                    rationale=plan.rationale
-                                ).model_dump(),
-                                "研究计划已生成"
-                            )
+                            if plan is not None:
+                                yield self._create_event(
+                                    DeepSearchEventType.RESEARCH_PLAN,
+                                    ResearchPlanEventData(
+                                        research_topic=plan.research_topic,
+                                        sub_topics=plan.sub_topics,
+                                        research_questions=plan.research_questions,
+                                        rationale=plan.rationale
+                                    ).model_dump(),
+                                    "研究计划已生成"
+                                )
+                            else:
+                                logger.warning("研究计划生成失败或为空，跳过研究计划事件")
                         
                         yield self._create_progress_event("研究计划已制定", 1, 8, 12.5)
                     
@@ -209,6 +185,15 @@ class DeepSearchService:
                     
                     # 网络搜索
                     elif node_name == "web_research":
+                        # 首次进入 web_research 节点时发送 WEB_SEARCHING 事件
+                        if not web_searching_sent:
+                            yield self._create_event(
+                                DeepSearchEventType.WEB_SEARCHING,
+                                {"message": "开始执行网络搜索"},
+                                "正在搜索网络资源"
+                            )
+                            web_searching_sent = True
+                        
                         # 发送搜索中的进度事件
                         yield self._create_progress_event("正在搜索网络资源", 3, 8, 37.5)
                         
@@ -309,6 +294,17 @@ class DeepSearchService:
                 final_state = await graph.ainvoke(state, config=config)
                 response = self._build_response(request, final_state)
             
+            # 发送报告生成完成事件
+            yield self._create_event(
+                DeepSearchEventType.REPORT_GENERATED,
+                {
+                    "report_length": len(response.markdown_report),
+                    "answer_length": len(response.answer),
+                    "sources_count": len(response.sources)
+                },
+                "研究报告已生成"
+            )
+            
             # 发送完成事件
             yield self._create_event(
                 DeepSearchEventType.COMPLETED,
@@ -324,9 +320,8 @@ class DeepSearchService:
                 f"执行失败: {str(e)}"
             )
         finally:
-            # 清理取消事件对象
-            if connection_id:
-                await self._cleanup_cancellation(connection_id)
+            # 取消状态清理由 endpoint 统一负责（engine 层统一管理）
+            pass
     
     def _build_initial_state(self, request: DeepSearchRequest) -> Dict[str, Any]:
         """构建初始状态."""

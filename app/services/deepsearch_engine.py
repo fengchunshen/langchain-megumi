@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Optional, TypedDict, Callable, TypeVar
 import asyncio
+import inspect
+import httpx
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -10,7 +12,6 @@ from langchain_openai import ChatOpenAI
 from typing_extensions import Annotated
 from langgraph.graph import add_messages
 import operator
-import requests
 import logging
 
 from app.core.config import settings
@@ -51,8 +52,8 @@ logger = logging.getLogger(__name__)
 # 全局变量：跟踪是否已降级到 Qwen3Max
 _gemini_degraded = False
 
-# 全局取消状态管理
-_connection_cancellations: Dict[str, bool] = {}
+# 全局取消状态管理（使用 asyncio.Event 更安全地避免竞态）
+_connection_cancellations: Dict[str, asyncio.Event] = {}
 _cancellations_lock = asyncio.Lock()
 
 
@@ -67,14 +68,19 @@ async def set_connection_cancelled(connection_id: str):
     """标记连接为已取消."""
     global _connection_cancellations
     async with _cancellations_lock:
-        _connection_cancellations[connection_id] = True
+        event = _connection_cancellations.get(connection_id)
+        if event is None:
+            event = asyncio.Event()
+            _connection_cancellations[connection_id] = event
+        event.set()
     logger.info(f"【取消状态】连接 {connection_id} 已被标记为取消")
 
 
 def is_connection_cancelled(connection_id: str) -> bool:
     """检查连接是否已被取消."""
     global _connection_cancellations
-    return _connection_cancellations.get(connection_id, False)
+    event = _connection_cancellations.get(connection_id)
+    return event.is_set() if event else False
 
 
 async def cleanup_connection_cancellation(connection_id: str):
@@ -164,7 +170,7 @@ def create_llm_with_fallback(
     )
 
 
-def invoke_llm_with_fallback(
+async def invoke_llm_with_fallback(
     invoke_func: Callable[[ChatOpenAI], T],
     node_name: str,
     gemini_model: str,
@@ -175,13 +181,13 @@ def invoke_llm_with_fallback(
     **llm_kwargs
 ) -> T:
     """
-    调用 LLM，支持 Gemini 失败后自动切换到 Qwen3Max.
+    异步调用 LLM，支持 Gemini 失败后自动切换到 Qwen3Max.
     
     如果已经降级到 Qwen3Max，直接使用 Qwen3Max，不再尝试 Gemini。
     否则先尝试使用 Gemini（重试2次），如果失败则切换到 Qwen3Max，并设置全局降级标志。
     
     Args:
-        invoke_func: 调用函数，接受一个参数（llm 实例）并返回结果
+        invoke_func: 异步调用函数，接受一个参数（llm 实例）并返回结果（支持同步和异步函数）
         node_name: 节点名称（用于日志）
         gemini_model: Gemini 模型名称
         temperature: 温度参数
@@ -223,7 +229,10 @@ def invoke_llm_with_fallback(
             if structured_output_type is not None:
                 llm = llm.with_structured_output(structured_output_type)
             
-            result = invoke_func(llm)
+            # 调用并根据可等待性进行处理（兼容同步函数返回协程的情况）
+            _maybe = invoke_func(llm)
+            result = await _maybe if inspect.isawaitable(_maybe) else _maybe
+            
             # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
             check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
@@ -259,7 +268,11 @@ def invoke_llm_with_fallback(
                 llm = llm.with_structured_output(structured_output_type)
             
             logger.info(f"【节点: {node_name}】Gemini 调用开始...")
-            result = invoke_func(llm)
+            
+            # 调用并根据可等待性进行处理（兼容同步函数返回协程的情况）
+            _maybe = invoke_func(llm)
+            result = await _maybe if inspect.isawaitable(_maybe) else _maybe
+            
             # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
             check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Gemini 调用成功")
@@ -285,7 +298,7 @@ def invoke_llm_with_fallback(
                 logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
                 
                 # 重新递归调用，这次直接使用 Qwen3Max
-                return invoke_llm_with_fallback(
+                return await invoke_llm_with_fallback(
                     invoke_func=invoke_func,
                     node_name=node_name,
                     gemini_model=gemini_model,
@@ -344,7 +357,7 @@ class WebSearchState(TypedDict):
     id: str
 
 
-def generate_research_plan(state: OverallState, config: RunnableConfig) -> OverallState:
+async def generate_research_plan(state: OverallState, config: RunnableConfig) -> OverallState:
     """
     生成研究方案节点。
     """
@@ -373,8 +386,8 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     
     logger.info("【节点: generate_research_plan】调用 LLM 生成方案...")
     try:
-        plan = invoke_llm_with_fallback(
-            invoke_func=lambda llm: llm.invoke(formatted_prompt),
+        plan = await invoke_llm_with_fallback(
+            invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
             node_name="generate_research_plan",
             gemini_model=reasoning_model,
             temperature=0.3,  # 从0.5降低到0.3，让输出更严谨详细
@@ -397,7 +410,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         return {"research_plan": None}
 
 
-def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
+async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     # 获取connection_id用于取消检查
     connection_id = None
     if config:
@@ -457,8 +470,8 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     )
     
     logger.info("【节点: generate_query】调用 LLM (基于方案) 生成查询...")
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="generate_query",
         gemini_model=reasoning_model,
         temperature=1.0,
@@ -485,9 +498,9 @@ def continue_to_web_research(state: QueryGenerationState):
     ]
 
 
-def bocha_web_search(query: str, count: int = 10) -> Dict[str, Any]:
+async def bocha_web_search(query: str, count: int = 10) -> Dict[str, Any]:
     """
-    使用博查搜索 API 进行网页搜索。
+    使用博查搜索 API 进行网页搜索（异步版本）。
 
     参数:
     - query: 搜索关键词
@@ -512,39 +525,40 @@ def bocha_web_search(query: str, count: int = 10) -> Dict[str, Any]:
     }
 
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=data)
         
-        if response.status_code == 200:
-            json_response = response.json()
-            if json_response.get("code") != 200 or not json_response.get("data"):
-                error_msg = json_response.get("msg", "未知错误")
+            if response.status_code == 200:
+                json_response = response.json()
+                if json_response.get("code") != 200 or not json_response.get("data"):
+                    error_msg = json_response.get("msg", "未知错误")
+                    logger.error(f"博查搜索API请求失败: {error_msg}")
+                    return {
+                        "webpages": [],
+                        "formatted_text": f"搜索API请求失败，原因是: {error_msg}"
+                    }
+                
+                webpages = json_response.get("data", {}).get("webPages", {}).get("value", [])
+                if not webpages:
+                    logger.warning(f"博查搜索API返回空结果，查询: {query[:100]}...")
+                    return {
+                        "webpages": [],
+                        "formatted_text": "未找到相关结果。"
+                    }
+                
+                logger.info(f"博查搜索API成功返回 {len(webpages)} 个结果，查询: {query[:100]}...")
+                formatted_text = format_bocha_search_results(webpages)
+                return {
+                    "webpages": webpages,
+                    "formatted_text": formatted_text
+                }
+            else:
+                error_msg = f"状态码: {response.status_code}, 错误信息: {response.text}"
                 logger.error(f"博查搜索API请求失败: {error_msg}")
                 return {
                     "webpages": [],
-                    "formatted_text": f"搜索API请求失败，原因是: {error_msg}"
+                    "formatted_text": f"搜索API请求失败，{error_msg}"
                 }
-            
-            webpages = json_response.get("data", {}).get("webPages", {}).get("value", [])
-            if not webpages:
-                logger.warning(f"博查搜索API返回空结果，查询: {query[:100]}...")
-                return {
-                    "webpages": [],
-                    "formatted_text": "未找到相关结果。"
-                }
-            
-            logger.info(f"博查搜索API成功返回 {len(webpages)} 个结果，查询: {query[:100]}...")
-            formatted_text = format_bocha_search_results(webpages)
-            return {
-                "webpages": webpages,
-                "formatted_text": formatted_text
-            }
-        else:
-            error_msg = f"状态码: {response.status_code}, 错误信息: {response.text}"
-            logger.error(f"博查搜索API请求失败: {error_msg}")
-            return {
-                "webpages": [],
-                "formatted_text": f"搜索API请求失败，{error_msg}"
-            }
     except Exception as e:
         logger.error(f"博查搜索API调用异常: {str(e)}")
         return {
@@ -553,9 +567,9 @@ def bocha_web_search(query: str, count: int = 10) -> Dict[str, Any]:
         }
 
 
-def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
+async def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
-    使用博查搜索 API 进行网页研究。
+    使用博查搜索 API 进行网页研究（异步版本）。
     """
     # 获取connection_id用于取消检查
     connection_id = None
@@ -574,9 +588,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     logger.info(f"【节点: web_research】开始执行搜索任务 ID={search_id}")
     logger.info(f"【节点: web_research】搜索查询: {search_query[:200]}...")
     
-    # 调用博查搜索 API
+    # 调用博查搜索 API（异步）
     logger.info(f"【节点: web_research】调用博查搜索 API...")
-    search_result = bocha_web_search(query=search_query, count=10)
+    search_result = await bocha_web_search(query=search_query, count=10)
     
     webpages = search_result.get("webpages", [])
     formatted_text = search_result.get("formatted_text", "")
@@ -604,8 +618,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     full_prompt = formatted_prompt + search_context
 
     logger.info(f"【节点: web_research】调用 LLM API，提示词长度: {len(full_prompt)} 字符")
-    llm_response = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(full_prompt),
+    llm_response = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(full_prompt),
         node_name="web_research",
         gemini_model=settings.GEMINI_MODEL,
         temperature=0,
@@ -631,7 +645,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     }
 
 
-def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
+async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 获取connection_id用于取消检查
     connection_id = None
     if config:
@@ -661,8 +675,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     )
     
     logger.info("【节点: reflection】调用 LLM 进行反思评估...")
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="reflection",
         gemini_model=reasoning_model,
         temperature=1.0,
@@ -729,7 +743,7 @@ def evaluate_research(state: ReflectionState, config: RunnableConfig) -> Overall
         ]
 
 
-def assess_content_quality(state: OverallState, config: RunnableConfig):
+async def assess_content_quality(state: OverallState, config: RunnableConfig):
     """内容质量评估节点。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -757,8 +771,8 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: assess_content_quality】使用模型: {reasoning_model}")
     
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="assess_content_quality",
         gemini_model=reasoning_model,
         temperature=0.3,
@@ -779,7 +793,7 @@ def assess_content_quality(state: OverallState, config: RunnableConfig):
     }
 
 
-def verify_facts(state: OverallState, config: RunnableConfig):
+async def verify_facts(state: OverallState, config: RunnableConfig):
     """事实验证节点。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -809,21 +823,20 @@ def verify_facts(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: verify_facts】使用模型: {reasoning_model}")
     
-    def invoke_with_method(llm: ChatOpenAI):
-        """调用带 method 参数的 structured_output."""
+    async def ainvoke_with_method(llm: ChatOpenAI):
+        """异步调用带 method 参数的 structured_output."""
         structured_llm = llm.with_structured_output(
             FactVerification,
             method="json_schema",
             include_raw=False
         )
-        return structured_llm.invoke(formatted_prompt)
+        return await structured_llm.ainvoke(formatted_prompt)
     
-    result = invoke_llm_with_fallback(
-        invoke_func=invoke_with_method,
+    result = await invoke_llm_with_fallback(
+        invoke_func=ainvoke_with_method,
         node_name="verify_facts",
         gemini_model=reasoning_model,
         temperature=0.1,
-        structured_output_type=FactVerification,
         connection_id=connection_id
     )
     
@@ -851,7 +864,7 @@ def verify_facts(state: OverallState, config: RunnableConfig):
     }
 
 
-def assess_relevance(state: OverallState, config: RunnableConfig):
+async def assess_relevance(state: OverallState, config: RunnableConfig):
     """相关性评估节点。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -879,8 +892,8 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: assess_relevance】使用模型: {reasoning_model}")
     
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="assess_relevance",
         gemini_model=reasoning_model,
         temperature=0.2,
@@ -902,7 +915,7 @@ def assess_relevance(state: OverallState, config: RunnableConfig):
     }
 
 
-def optimize_summary(state: OverallState, config: RunnableConfig):
+async def optimize_summary(state: OverallState, config: RunnableConfig):
     """摘要优化节点。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -935,8 +948,8 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: optimize_summary】使用模型: {reasoning_model}")
     
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="optimize_summary",
         gemini_model=reasoning_model,
         temperature=0.3,
@@ -965,7 +978,7 @@ def optimize_summary(state: OverallState, config: RunnableConfig):
     }
 
 
-def generate_verification_report(state: OverallState, config: RunnableConfig):
+async def generate_verification_report(state: OverallState, config: RunnableConfig):
     """生成综合验证报告节点。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -1023,7 +1036,7 @@ def generate_verification_report(state: OverallState, config: RunnableConfig):
     }
 
 
-def finalize_answer(state: OverallState, config: RunnableConfig):
+async def finalize_answer(state: OverallState, config: RunnableConfig):
     """生成最终答案，返回高度围绕用户提问的调查研究报告。"""
     # 获取connection_id用于取消检查
     connection_id = None
@@ -1082,8 +1095,8 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     logger.info("【节点: finalize_answer】调用 LLM 生成专业报告...")
     
     # *** 关键：这里不使用 .with_structured_output()，直接生成纯文本报告 ***
-    result = invoke_llm_with_fallback(
-        invoke_func=lambda llm: llm.invoke(formatted_prompt),
+    result = await invoke_llm_with_fallback(
+        invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="finalize_answer",
         gemini_model=reasoning_model,
         temperature=0.2,

@@ -97,7 +97,6 @@ async def run_deepsearch_stream(
                     logger.info(f"检测到客户端断开连接: {connection_id}")
                     # 立即标记取消状态
                     await set_connection_cancelled(connection_id)
-                    await deepsearch_service.cancel_connection(connection_id)
                     await sse_monitor.error_connection(connection_id, "客户端主动断开连接")
                     # 清理取消状态
                     await cleanup_connection_cancellation(connection_id)
@@ -107,7 +106,7 @@ async def run_deepsearch_stream(
                 await sse_monitor.update_activity(connection_id)
                 
                 # SSE 格式
-                yield f"event: {event.event_type}\n"
+                yield f"event: {event.event_type.value}\n"
                 yield f"data: {event.model_dump_json()}\n\n"
             
             # 标记连接完成
@@ -119,7 +118,6 @@ async def run_deepsearch_stream(
             
             # 通知服务和引擎取消处理流程
             await set_connection_cancelled(connection_id)
-            await deepsearch_service.cancel_connection(connection_id)
             await sse_monitor.error_connection(connection_id, "客户端主动断开连接")
             
             # 清理取消状态
@@ -137,13 +135,13 @@ async def run_deepsearch_stream(
             
             # 发送错误事件
             error_event = DeepSearchEvent(
-                eventType=DeepSearchEventType.ERROR,
+                event_type=DeepSearchEventType.ERROR,
                 timestamp=datetime.now().isoformat(),
-                sequenceNumber=9999,
+                sequence_number=9999,
                 data={"error": error_msg},
                 message=f"执行失败: {error_msg}"
             )
-            yield f"event: error\n"
+            yield f"event: {error_event.event_type.value}\n"
             yield f"data: {error_event.model_dump_json()}\n\n"
         finally:
             # 确保清理工作总是执行
