@@ -74,12 +74,13 @@ async def run_deepsearch_stream(
     client_ip = request.client.host if request.client else None
     user_agent = request.headers.get("user-agent")
     
-    # 创建监控连接
+    # 创建监控连接，传递 Request 对象用于主动检测连接状态
     connection_id = await sse_monitor.create_connection(
         user_id=None,  # 如果有认证系统，从token中获取
         request_query=request_data.query,
         client_ip=client_ip,
-        user_agent=user_agent
+        user_agent=user_agent,
+        request_object=request  # 传递 Request 对象用于健康检查
     )
     
     logger.info(f"DeepSearch流式请求开始: {connection_id}")
@@ -89,17 +90,44 @@ async def run_deepsearch_stream(
         # 导入取消函数
         from app.services.deepsearch_engine import set_connection_cancelled, cleanup_connection_cancellation
         
+        # 创建后台任务定期检查连接状态
+        check_task = None
+        
+        async def periodic_connection_check():
+            """定期检查连接状态的后台任务."""
+            check_interval = 5  # 每5秒检查一次
+            while True:
+                try:
+                    await asyncio.sleep(check_interval)
+                    if await request.is_disconnected():
+                        logger.info(f"后台任务检测到客户端断开连接: {connection_id}")
+                        await set_connection_cancelled(connection_id)
+                        await sse_monitor.error_connection(connection_id, "客户端主动断开连接（后台检测）")
+                        await cleanup_connection_cancellation(connection_id)
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning(f"连接检查任务出错: {e}")
+                    break
+        
         try:
+            # 启动后台连接检查任务
+            check_task = asyncio.create_task(periodic_connection_check())
+            
             # 使用监控的迭代器包装原始服务，传递connection_id
             async for event in deepsearch_service.run_stream(request_data, connection_id):
-                # **关键改进：主动检查客户端连接状态**
+                # **关键改进：主动检查客户端连接状态（双重检测）**
                 if await request.is_disconnected():
-                    logger.info(f"检测到客户端断开连接: {connection_id}")
+                    logger.info(f"事件循环中检测到客户端断开连接: {connection_id}")
                     # 立即标记取消状态
                     await set_connection_cancelled(connection_id)
                     await sse_monitor.error_connection(connection_id, "客户端主动断开连接")
                     # 清理取消状态
                     await cleanup_connection_cancellation(connection_id)
+                    # 取消后台检查任务
+                    if check_task and not check_task.done():
+                        check_task.cancel()
                     return
                 
                 # 更新监控信息
@@ -112,9 +140,25 @@ async def run_deepsearch_stream(
             # 标记连接完成
             await sse_monitor.complete_connection(connection_id)
             
+            # 取消后台检查任务
+            if check_task and not check_task.done():
+                check_task.cancel()
+                try:
+                    await check_task
+                except asyncio.CancelledError:
+                    pass
+            
         except asyncio.CancelledError:
             # 客户端主动断开连接（备用方案）
             logger.info(f"捕获到CancelledError: {connection_id}")
+            
+            # 取消后台检查任务
+            if check_task and not check_task.done():
+                check_task.cancel()
+                try:
+                    await check_task
+                except asyncio.CancelledError:
+                    pass
             
             # 通知服务和引擎取消处理流程
             await set_connection_cancelled(connection_id)
@@ -145,6 +189,14 @@ async def run_deepsearch_stream(
             yield f"data: {error_event.model_dump_json()}\n\n"
         finally:
             # 确保清理工作总是执行
+            # 取消后台检查任务
+            if check_task and not check_task.done():
+                check_task.cancel()
+                try:
+                    await check_task
+                except asyncio.CancelledError:
+                    pass
+            
             await cleanup_connection_cancellation(connection_id)
             logger.info(f"事件生成器清理完成: {connection_id}")
     

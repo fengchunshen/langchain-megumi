@@ -50,19 +50,59 @@ from .deepsearch_types import (
 
 logger = logging.getLogger(__name__)
 
-# 全局变量：跟踪是否已降级到 Qwen3Max
-_gemini_degraded = False
+_connection_degradations: Dict[str, bool] = {}
+_degradations_lock = asyncio.Lock()
 
-# 全局取消状态管理（使用 asyncio.Event 更安全地避免竞态）
 _connection_cancellations: Dict[str, asyncio.Event] = {}
 _cancellations_lock = asyncio.Lock()
 
 
-def reset_degradation_status():
-    """重置降级状态（用于测试或新请求开始时）."""
-    global _gemini_degraded
-    _gemini_degraded = False
-    logger.info("【降级状态】已重置，将重新尝试 Gemini")
+async def reset_degradation_status(connection_id: Optional[str] = None):
+    """
+    重置降级状态（用于测试或新请求开始时）.
+    
+    Args:
+        connection_id: 连接ID，如果提供则只重置该连接的降级状态；如果为None则重置所有连接
+    """
+    global _connection_degradations
+    async with _degradations_lock:
+        if connection_id:
+            if connection_id in _connection_degradations:
+                del _connection_degradations[connection_id]
+                logger.info(f"【降级状态】连接 {connection_id} 的降级状态已重置，将重新尝试 Gemini")
+        else:
+            _connection_degradations.clear()
+            logger.info("【降级状态】所有连接的降级状态已重置，将重新尝试 Gemini")
+
+
+async def is_connection_degraded(connection_id: Optional[str] = None) -> bool:
+    """
+    检查连接是否已降级到 Qwen3Max.
+    
+    Args:
+        connection_id: 连接ID，如果为None则返回False（未降级）
+        
+    Returns:
+        bool: 如果连接已降级返回True，否则返回False
+    """
+    if not connection_id:
+        return False
+    async with _degradations_lock:
+        return _connection_degradations.get(connection_id, False)
+
+
+async def set_connection_degraded(connection_id: Optional[str] = None):
+    """
+    设置连接为已降级状态.
+    
+    Args:
+        connection_id: 连接ID，如果为None则不执行任何操作
+    """
+    if not connection_id:
+        return
+    async with _degradations_lock:
+        _connection_degradations[connection_id] = True
+        logger.warning(f"【降级状态】连接 {connection_id} 已设置为降级状态，后续调用将直接使用 Qwen3Max")
 
 
 async def set_connection_cancelled(connection_id: str):
@@ -105,9 +145,7 @@ def get_qwen_base_url() -> str:
     base_url = settings.DASHSCOPE_BASE_URL
     if not base_url:
         raise ValueError("DASHSCOPE_BASE_URL is not set")
-    # 移除末尾的斜杠（如果有）
     base_url = base_url.rstrip('/')
-    # 确保以 /v1 结尾
     if not base_url.endswith('/v1'):
         base_url = f"{base_url}/v1"
     logger.debug(f"Qwen3Max API base URL: {base_url}")
@@ -119,9 +157,7 @@ def get_gemini_base_url() -> str:
     base_url = settings.GEMINI_API_URL
     if not base_url:
         raise ValueError("GEMINI_API_URL is not set")
-    # 移除末尾的斜杠（如果有）
     base_url = base_url.rstrip('/')
-    # 确保以 /v1 结尾
     if not base_url.endswith('/v1'):
         base_url = f"{base_url}/v1"
     logger.debug(f"Gemini API base URL: {base_url}")
@@ -184,8 +220,8 @@ async def invoke_llm_with_fallback(
     """
     异步调用 LLM，支持 Gemini 失败后自动切换到 Qwen3Max.
     
-    如果已经降级到 Qwen3Max，直接使用 Qwen3Max，不再尝试 Gemini。
-    否则先尝试使用 Gemini（重试2次），如果失败则切换到 Qwen3Max，并设置全局降级标志。
+    如果该连接已经降级到 Qwen3Max，直接使用 Qwen3Max，不再尝试 Gemini。
+    否则先尝试使用 Gemini（重试2次），如果失败则切换到 Qwen3Max，并设置该连接的降级标志。
     
     Args:
         invoke_func: 异步调用函数，接受一个参数（llm 实例）并返回结果（支持同步和异步函数）
@@ -194,7 +230,7 @@ async def invoke_llm_with_fallback(
         temperature: 温度参数
         qwen_model: Qwen3Max 模型名称（默认使用配置中的 DASHSCOPE_CHAT_MODEL）
         structured_output_type: 结构化输出类型（如果提供，会自动调用 with_structured_output）
-        connection_id: 连接ID，用于取消检查
+        connection_id: 连接ID，用于取消检查和降级状态管理
         **llm_kwargs: 传递给 ChatOpenAI 的其他参数
         
     Returns:
@@ -204,19 +240,16 @@ async def invoke_llm_with_fallback(
         Exception: 如果两种模型都失败，抛出最后一个异常
         asyncio.CancelledError: 如果连接被取消
     """
-    global _gemini_degraded
-    
-    # 在每次重试前检查取消状态
     check_cancellation_and_raise(connection_id)
     
     if qwen_model is None:
         qwen_model = settings.DASHSCOPE_CHAT_MODEL
     
-    # 如果已经降级，直接使用 Qwen3Max
-    if _gemini_degraded:
+    is_degraded = await is_connection_degraded(connection_id)
+    
+    if is_degraded:
         logger.info(f"【节点: {node_name}】已降级，直接使用 Qwen3Max ({qwen_model})...")
         try:
-            # 再次检查取消状态
             check_cancellation_and_raise(connection_id)
             
             llm = create_llm_with_fallback(
@@ -226,15 +259,12 @@ async def invoke_llm_with_fallback(
                 max_retries=2
             )
             
-            # 如果指定了结构化输出类型，使用 with_structured_output
             if structured_output_type is not None:
                 llm = llm.with_structured_output(structured_output_type)
             
-            # 调用并根据可等待性进行处理（兼容同步函数返回协程的情况）
             _maybe = invoke_func(llm)
             result = await _maybe if inspect.isawaitable(_maybe) else _maybe
             
-            # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
             check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
             return result
@@ -242,39 +272,33 @@ async def invoke_llm_with_fallback(
             logger.error(f"【节点: {node_name}】Qwen3Max 调用失败: {str(e)}", exc_info=True)
             raise e
     
-    # 尝试使用 Gemini（重试1次）
     last_error = None
-    for attempt in range(2):  # 第一次 + 1次重试 = 总共2次尝试
+    for attempt in range(2):
         try:
-            # 每次重试前都检查取消状态
             check_cancellation_and_raise(connection_id)
             
             base_url = get_gemini_base_url()
             api_key = settings.GEMINI_API_KEY
             logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
             
-            # 每次重试都重新创建LLM实例
             llm = ChatOpenAI(
                 model=gemini_model,
                 temperature=temperature,
                 api_key=api_key,
                 base_url=base_url,
                 timeout=settings.API_TIMEOUT,
-                max_retries=1,  # 内部不再重试，由外层控制
+                max_retries=1,
                 **llm_kwargs
             )
             
-            # 如果指定了结构化输出类型，使用 with_structured_output
             if structured_output_type is not None:
                 llm = llm.with_structured_output(structured_output_type)
             
             logger.info(f"【节点: {node_name}】Gemini 调用开始...")
             
-            # 调用并根据可等待性进行处理（兼容同步函数返回协程的情况）
             _maybe = invoke_func(llm)
             result = await _maybe if inspect.isawaitable(_maybe) else _maybe
             
-            # 成功返回后立刻再次检查是否已取消，避免断开后继续输出
             check_cancellation_and_raise(connection_id)
             logger.info(f"【节点: {node_name}】Gemini 调用成功")
             return result
@@ -285,20 +309,14 @@ async def invoke_llm_with_fallback(
             
             if attempt == 0:
                 logger.info(f"【节点: {node_name}】Gemini 第 1 次重试...")
-                # 重试前检查取消状态
                 check_cancellation_and_raise(connection_id)
             else:
-                # 所有重试都失败了，切换到 Qwen3Max
                 logger.warning(f"【节点: {node_name}】Gemini 重试{attempt}次后仍失败，切换到 Qwen3Max ({qwen_model})...")
                 
-                # 切换前检查取消状态
                 check_cancellation_and_raise(connection_id)
                 
-                # 设置全局降级标志
-                _gemini_degraded = True
-                logger.warning(f"【降级状态】已设置降级标志，后续所有调用将直接使用 Qwen3Max")
+                await set_connection_degraded(connection_id)
                 
-                # 重新递归调用，这次直接使用 Qwen3Max
                 return await invoke_llm_with_fallback(
                     invoke_func=invoke_func,
                     node_name=node_name,
@@ -365,10 +383,8 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
     """
     生成研究方案节点。
     """
-    # 获取connection_id用于取消检查，安全处理config对象
     connection_id = None
     if config:
-        # 处理config可能是RunnableConfig对象或字典的情况
         if hasattr(config, 'configurable') and config.configurable:
             connection_id = config.configurable.get("connection_id")
         elif isinstance(config, dict):
@@ -376,7 +392,6 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
     
     logger.info("【节点: generate_research_plan】开始生成研究方案...")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
@@ -398,7 +413,6 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
             structured_output_type=ResearchPlan,
             connection_id=connection_id
         )
-        # 返回后再次检查取消，避免后续日志继续输出
         check_cancellation_and_raise(connection_id)
         logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
         logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
@@ -406,7 +420,6 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
             logger.info(f"【节点: generate_research_plan】  子主题 {idx}: {sub_topic}")
         return {"research_plan": plan}
     except asyncio.CancelledError:
-        # 主动取消时不记录错误，向上抛出以尽快停止图执行
         logger.info("【节点: generate_research_plan】检测到取消，终止节点执行")
         raise
     except Exception as e:
@@ -415,7 +428,6 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
 
 
 async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -423,12 +435,10 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info("【节点: generate_query】开始生成搜索查询...")
     
-    # 判断运行模式：首次运行 vs 针对性运行
     unanswered_questions = state.get("unanswered_questions", [])
     is_targeted_mode = len(unanswered_questions) > 0
     
@@ -438,36 +448,28 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     research_topic = get_research_topic(state["messages"])
     research_plan = state.get("research_plan")
     
-    # 将方案格式化为字符串
     plan_str = "无特定方案，请直接分析研究主题。"
     if research_plan and research_plan.sub_topics:
         plan_str = f"主题: {research_plan.research_topic}\n\n关键子主题和研究问题:\n"
         
-        # 按子主题分组研究问题
         for i, sub_topic in enumerate(research_plan.sub_topics, 1):
             plan_str += f"\n{i}. {sub_topic}\n"
             plan_str += "   研究问题:\n"
-            # 找出属于当前子主题的研究问题
             topic_questions = [q for q in research_plan.research_questions if q.startswith(f"{sub_topic}：")]
             if not topic_questions:
-                # 如果没有严格匹配的，尝试模糊匹配
                 topic_questions = [q for q in research_plan.research_questions if sub_topic in q]
             for j, question in enumerate(topic_questions, 1):
-                # 移除「子主题：」前缀，只显示问题本身
                 question_text = question.split("：", 1)[-1] if "：" in question else question
                 plan_str += f"   {i}.{j}. {question_text}\n"
         
         plan_str += f"\n理由: {research_plan.rationale}"
     
-    # 根据模式设置不同的提示词
     if is_targeted_mode:
-        # 针对性模式：仅针对未回答的问题生成查询
         logger.info(f"【节点: generate_query】运行模式: 针对性（Targeted）")
         logger.info(f"【节点: generate_query】未回答问题数量: {len(unanswered_questions)}")
         for idx, question in enumerate(unanswered_questions[:3], 1):
             logger.info(f"【节点: generate_query】  未回答问题 {idx}: {question[:100]}...")
         
-        # 针对性模式：每个问题生成1-2个查询，总数不超过配置的上限
         max_queries = min(len(unanswered_questions) * 2, state.get("initial_search_query_count", 3))
         
         unanswered_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(unanswered_questions)])
@@ -482,7 +484,6 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
 {unanswered_text}
 """
     else:
-        # 首次运行模式：基于完整研究计划生成初始查询
         logger.info(f"【节点: generate_query】运行模式: 首次（Initial）")
         initial_count = state.get("initial_search_query_count")
         if initial_count is None:
@@ -523,7 +524,6 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
         structured_output_type=SearchQueryList,
         connection_id=connection_id
     )
-    # 返回后再次检查取消，避免后续日志继续输出
     check_cancellation_and_raise(connection_id)
     
     query_count = len(result.query) if result.query else 0
@@ -536,7 +536,6 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
 
 
 def continue_to_web_research(state: QueryGenerationState):
-    # 只处理本轮新生成的查询，避免重复执行历史查询
     new_queries = state.get("new_search_query", [])
     query_count = len(new_queries)
     logger.info(f"【节点: continue_to_web_research】准备分发 {query_count} 个搜索任务到 web_research 节点")
@@ -619,7 +618,6 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     """
     使用博查搜索 API 进行网页研究，并进行深度抓取和正文提取（异步版本）。
     """
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -627,7 +625,6 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     search_query = state["search_query"]
@@ -636,7 +633,6 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     logger.info(f"【节点: web_research】开始执行搜索任务 ID={search_id}")
     logger.info(f"【节点: web_research】搜索查询: {search_query[:200]}...")
     
-    # 调用博查搜索 API（异步）
     logger.info(f"【节点: web_research】调用博查搜索 API...")
     search_result = await bocha_web_search(query=search_query, count=10)
     
@@ -651,16 +647,12 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         for idx, page in enumerate(webpages[:3], 1):
             logger.info(f"【节点: web_research】  {idx}. {page.get('name', 'N/A')[:100]}")
     
-    # ========== 深度抓取逻辑开始 ==========
-    
-    # 选取 Top-K 网页进行深度抓取
     top_k = min(settings.WEB_SCRAPE_TOP_K, len(webpages))
     top_pages = webpages[:top_k]
     top_urls = [p.get("url") for p in top_pages if p.get("url")]
     
     logger.info(f"【节点: web_research】准备深度抓取 Top-{top_k} 网页...")
     
-    # 并发抓取网页并提取正文
     deep_docs = []
     if top_urls:
         try:
@@ -672,7 +664,6 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
                 user_agent=settings.WEB_SCRAPE_USER_AGENT,
             )
             
-            # 组装深度文档列表（保持编号与 top_pages 一致）
             url_to_text = {url: text for url, text in scraped_results}
             
             for i, page in enumerate(top_pages, start=1):
@@ -687,11 +678,9 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         except Exception as e:
             logger.error(f"【节点: web_research】深度抓取失败: {e}", exc_info=True)
     
-    # 构建 LLM 上下文
     context_for_llm = ""
     
     if deep_docs:
-        # 使用深度抓取的正文作为上下文
         deep_context_parts = []
         for idx, title, url, text in deep_docs:
             deep_context_parts.append(
@@ -702,7 +691,6 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
             )
         deep_context = "\n".join(deep_context_parts)
         
-        # 控制总长度
         deep_context = clean_and_truncate(
             deep_context, 
             settings.WEB_SCRAPE_MAX_TOTAL_CHARS
@@ -714,23 +702,18 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
             f"总长度: {len(context_for_llm)} 字符"
         )
     else:
-        # 回退到博查搜索的摘要
         context_for_llm = formatted_text
         logger.warning(
             f"【节点: web_research】深度抓取失败或无结果，"
             f"回退使用博查搜索摘要"
         )
     
-    # ========== 深度抓取逻辑结束 ==========
-    
-    # 使用 Gemini 对搜索结果进行总结和整理
     logger.info(f"【节点: web_research】开始使用 LLM 总结搜索结果...")
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
         research_topic=search_query,
     )
 
-    # 将搜索结果添加到提示词中，并提示 LLM 使用引用编号
     search_context = (
         f"\n\n搜索查询: {search_query}\n"
         f"仅基于以下网页正文内容进行严谨总结，并在每条事实后使用 [编号] 标注来源：\n"
@@ -748,10 +731,8 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     )
     logger.info(f"【节点: web_research】LLM 总结完成，响应长度: {len(llm_response.content)} 字符")
     
-    # 处理引用和来源
     logger.info(f"【节点: web_research】开始处理引用和来源...")
     
-    # 如果有深度抓取的结果，使用 top_pages；否则使用全部 webpages
     pages_for_citation = top_pages if deep_docs else webpages
     
     resolved_urls = resolve_urls(pages_for_citation, search_id)
@@ -762,13 +743,11 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     )
     modified_text = insert_citation_markers(llm_response.content, citations)
     
-    # sources_gathered: 仅包含深度抓取的来源（用于引用）
     sources_gathered = [
         item for citation in citations 
         for item in citation["segments"]
     ]
     
-    # all_sources_gathered: 包含所有搜索到的来源（包括非 top-k）
     all_resolved_urls = resolve_urls(webpages, search_id)
     all_sources = []
     for page in webpages:
@@ -792,14 +771,13 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
 
     return {
         "sources_gathered": sources_gathered,
-        "all_sources_gathered": all_sources,  # 保存所有搜索到的资源
+        "all_sources_gathered": all_sources,
         "search_query": [search_query],
         "web_research_result": [modified_text],
     }
 
 
 async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -807,7 +785,6 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
@@ -821,7 +798,6 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
     search_queries = state.get("search_query", [])
     logger.info(f"【节点: reflection】当前已有 {len(web_research_results)} 个搜索结果，{len(search_queries)} 个搜索查询")
 
-    # 获取研究计划并格式化
     research_plan = state.get("research_plan")
     plan_str = "无特定研究计划"
     if research_plan:
@@ -873,12 +849,12 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
         "unanswered_questions": result.unanswered_questions,
         "research_loop_count": state["research_loop_count"],
         "number_of_ran_queries": len(state["search_query"]),
-        "max_research_loops": state.get("max_research_loops", 5),  # 传递最大循环次数，默认5
+        "max_research_loops": state.get("max_research_loops", 5),
     }
 
 
 def evaluate_research(state: ReflectionState, config: RunnableConfig) -> str:
-    max_research_loops = state.get("max_research_loops", 5)  # 默认5次循环
+    max_research_loops = state.get("max_research_loops", 5)
     loop_count = state["research_loop_count"]
     is_sufficient = state["is_sufficient"]
     
@@ -904,7 +880,6 @@ def evaluate_research(state: ReflectionState, config: RunnableConfig) -> str:
 
 async def assess_content_quality(state: OverallState, config: RunnableConfig):
     """内容质量评估节点。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -912,15 +887,12 @@ async def assess_content_quality(state: OverallState, config: RunnableConfig):
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info(f"【节点: assess_content_quality】开始内容质量评估")
     
-    # 合并所有研究内容
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
-    # 格式化提示词
     formatted_prompt = content_quality_instructions.format(
         research_topic=get_research_topic(state["messages"]),
         content=combined_content
@@ -954,7 +926,6 @@ async def assess_content_quality(state: OverallState, config: RunnableConfig):
 
 async def verify_facts(state: OverallState, config: RunnableConfig):
     """事实验证节点。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -962,15 +933,12 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info(f"【节点: verify_facts】开始事实验证")
     
-    # 合并所有研究内容
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
-    # 格式化提示词
     current_date = get_current_date()
     formatted_prompt = fact_verification_instructions.format(
         current_date=current_date,
@@ -983,7 +951,6 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
     logger.info(f"【节点: verify_facts】使用模型: {reasoning_model}")
     
     async def ainvoke_with_method(llm: ChatOpenAI):
-        """异步调用带 method 参数的 structured_output."""
         structured_llm = llm.with_structured_output(
             FactVerification,
             method="json_schema",
@@ -1025,7 +992,6 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
 
 async def assess_relevance(state: OverallState, config: RunnableConfig):
     """相关性评估节点。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -1033,15 +999,12 @@ async def assess_relevance(state: OverallState, config: RunnableConfig):
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info(f"【节点: assess_relevance】开始相关性评估")
     
-    # 合并所有研究内容
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
-    # 格式化提示词
     formatted_prompt = relevance_assessment_instructions.format(
         research_topic=get_research_topic(state["messages"]),
         content=combined_content
@@ -1076,7 +1039,6 @@ async def assess_relevance(state: OverallState, config: RunnableConfig):
 
 async def optimize_summary(state: OverallState, config: RunnableConfig):
     """摘要优化节点。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -1084,15 +1046,12 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info(f"【节点: optimize_summary】开始摘要优化")
     
-    # 获取原始摘要
     original_summary = "\n\n---\n\n".join(state.get("web_research_result", []))
     
-    # 格式化提示词
     current_date = get_current_date()
     formatted_prompt = summary_optimization_instructions.format(
         current_date=current_date,
@@ -1116,7 +1075,6 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
         connection_id=connection_id
     )
     
-    # 计算最终置信度评分
     quality_score = state.get("content_quality", {}).get("quality_score", 0.5)
     fact_confidence = state.get("fact_verification", {}).get("confidence_score", 0.5)
     relevance_score = state.get("relevance_assessment", {}).get("relevance_score", 0.5)
@@ -1139,7 +1097,6 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
 
 async def generate_verification_report(state: OverallState, config: RunnableConfig):
     """生成综合验证报告节点。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -1147,12 +1104,10 @@ async def generate_verification_report(state: OverallState, config: RunnableConf
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     logger.info(f"【节点: generate_verification_report】开始生成验证报告")
     
-    # 生成综合验证报告
     quality_data = state.get("content_quality", {})
     fact_data = state.get("fact_verification", {})
     relevance_data = state.get("relevance_assessment", {})
@@ -1197,7 +1152,6 @@ async def generate_verification_report(state: OverallState, config: RunnableConf
 
 async def finalize_answer(state: OverallState, config: RunnableConfig):
     """生成最终答案，返回高度围绕用户提问的调查研究报告。"""
-    # 获取connection_id用于取消检查
     connection_id = None
     if config:
         if hasattr(config, 'configurable') and config.configurable:
@@ -1205,7 +1159,6 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    # 检查取消状态
     check_cancellation_and_raise(connection_id)
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
@@ -1217,10 +1170,8 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     sources_gathered = state.get("sources_gathered", [])
     logger.info(f"【节点: finalize_answer】汇总 {len(web_research_results)} 个搜索结果，{len(sources_gathered)} 个数据源")
 
-    # 获取所有原始材料
     summaries = "\n---\n\n".join(web_research_results)
     
-    # 获取上一步的结构化洞察
     optimization_data = state.get("summary_optimization", {})
     key_insights = optimization_data.get("key_insights", [])
     actionable_items = optimization_data.get("actionable_items", [])
@@ -1228,7 +1179,6 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     logger.info(f"【节点: finalize_answer】核心洞察数量: {len(key_insights)}")
     logger.info(f"【节点: finalize_answer】可行建议数量: {len(actionable_items)}")
     
-    # 构建增强的提示词，将结构化洞察注入
     prompt_enhancement = ""
     if key_insights or actionable_items:
         prompt_enhancement = "\n\n---\n\n**以下是基于研究材料提炼出的核心洞察和建议，请将它们作为报告的重点，在报告中详细展开论述：**\n\n"
@@ -1244,16 +1194,14 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
             for i, item in enumerate(actionable_items, 1):
                 prompt_enhancement += f"{i}. {item}\n"
     
-    # 使用 answer_instructions 来撰写报告
     formatted_prompt = answer_instructions.format(
         current_date=get_current_date(),
         research_topic=get_research_topic(state["messages"]),
-        summaries=summaries + prompt_enhancement  # 将洞察注入提示词
+        summaries=summaries + prompt_enhancement
     )
     
     logger.info("【节点: finalize_answer】调用 LLM 生成专业报告...")
     
-    # *** 关键：这里不使用 .with_structured_output()，直接生成纯文本报告 ***
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="finalize_answer",
@@ -1261,43 +1209,35 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
         temperature=0.2,
         connection_id=connection_id
     )
-    final_report = result.content  # 这就是纯 Markdown 报告
+    final_report = result.content
     
     logger.info(f"【节点: finalize_answer】LLM 生成完成，报告长度: {len(final_report)} 字符")
     
-    # 处理数据源引用（改进版：扫描引用编号并生成参考来源列表）
     logger.info("【节点: finalize_answer】处理数据源引用...")
     import re
     
-    # 1. 扫描报告中的所有引用编号 [1], [2], [3] 等
     citation_pattern = re.compile(r'\[(\d+)\]')
     found_citations = set(citation_pattern.findall(final_report))
     logger.info(f"【节点: finalize_answer】扫描到 {len(found_citations)} 个引用编号: {sorted(found_citations, key=int)}")
     
-    # 2. 将 shortUrl 替换为实际 URL
     enhanced_content = final_report
     for source in sources_gathered:
         if source["shortUrl"] in enhanced_content:
             enhanced_content = enhanced_content.replace(source["shortUrl"], source["value"])
     
-    # 3. 构建引用编号到来源的映射（基于顺序）
     citation_to_source = {}
     unique_sources: List[Dict[str, Any]] = []
     
-    # 按引用编号排序来源（基于 shortUrl 中的编号）
     def extract_citation_num(source: Dict[str, Any]) -> int:
         """从 shortUrl 中提取引用编号"""
         short_url = source.get("shortUrl", "")
-        # shortUrl 格式: https://vertexaisearch.cloud.google.com/id/{search_id}-{idx}
         match = re.search(r'/id/\d+-(\d+)$', short_url)
         if match:
             return int(match.group(1))
         return 999999  # 如果无法提取，放到最后
     
-    # 按照引用编号排序来源
     sorted_sources = sorted(sources_gathered, key=extract_citation_num)
     
-    # 为每个来源分配引用编号（从1开始）
     for idx, source in enumerate(sorted_sources, start=1):
         citation_num = str(idx)
         citation_to_source[citation_num] = source
@@ -1305,18 +1245,14 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     
     logger.info(f"【节点: finalize_answer】共有 {len(unique_sources)} 个数据源")
     
-    # 4. 在报告末尾添加"参考来源"列表（如果报告中有引用编号）
     if found_citations:
         logger.info("【节点: finalize_answer】在报告末尾添加参考来源列表...")
         
-        # 检查报告是否已有"参考来源"、"引用"、"来源" 等标题
         has_references = bool(re.search(r'#+\s*(参考来源|引用|来源|参考资料|References)', enhanced_content, re.IGNORECASE))
         
         if not has_references:
-            # 如果没有，添加参考来源列表
             enhanced_content += "\n\n---\n\n## 参考来源\n\n"
             
-            # 按引用编号排序
             sorted_citations = sorted([int(c) for c in found_citations])
             
             for citation_num in sorted_citations:
@@ -1327,7 +1263,6 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
                     url = source.get("value", "")
                     enhanced_content += f"{citation_num}. [{label}]({url})\n"
                 else:
-                    # 引用编号在报告中存在，但没有对应的来源
                     logger.warning(f"【节点: finalize_answer】引用编号 [{citation_num}] 没有对应的来源")
                     enhanced_content += f"{citation_num}. 来源未找到\n"
             

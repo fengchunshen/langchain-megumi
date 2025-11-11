@@ -2,6 +2,8 @@
 from typing import Any, Dict, AsyncGenerator
 import logging
 import asyncio
+import time
+import uuid
 from datetime import datetime
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -34,11 +36,10 @@ class DeepSearchService:
 
     async def run(self, request: DeepSearchRequest) -> DeepSearchResponse:
         try:
-            # 重置降级状态，每次新请求都从 Gemini 开始尝试
-            reset_degradation_status()
+            connection_id = str(uuid.uuid4())
+            await reset_degradation_status(connection_id)
             
-            logger.info("开始构建初始状态...")
-            # 构建初始状态（符合 agent.state.OverallState 的字段约定）
+            logger.info(f"开始构建初始状态 [连接: {connection_id}]...")
             state: Dict[str, Any] = {
                 "messages": [HumanMessage(content=request.query)],
             }
@@ -55,14 +56,12 @@ class DeepSearchService:
 
             logger.info(f"初始状态构建完成: {list(state.keys())}")
 
-            # 可选：支持通过 config 传递可配置项（此处先使用默认）
-            config = RunnableConfig()
+            config = RunnableConfig(configurable={"connection_id": connection_id})
 
             logger.info("开始执行图流...")
             result_state = await graph.ainvoke(state, config=config)
             logger.info("图流执行完成")
 
-            # 构建响应
             response = self._build_response(request, result_state)
             
             logger.info(f"结果提取完成 - 答案长度: {len(response.answer)}, 被引用数据源数量: {len(response.sources)}, 所有搜索到的资源数量: {len(response.all_sources)}")
@@ -88,21 +87,25 @@ class DeepSearchService:
             DeepSearchEvent: 研究过程事件
         """
         self.sequence_number = 0
-        
-        # 采用引擎的统一取消状态（通过 connection_id 查询）
+        last_heartbeat_time = time.time()
+        heartbeat_interval = 30
+        last_connection_check_time = time.time()
+        connection_check_interval = 10
+        chunk_count = 0
         
         try:
-            # 重置降级状态，每次新请求都从 Gemini 开始尝试
-            reset_degradation_status()
+            if not connection_id:
+                connection_id = str(uuid.uuid4())
+                logger.info(f"未提供 connection_id，已生成新的连接ID: {connection_id}")
             
-            # 发送开始事件
+            await reset_degradation_status(connection_id)
+            
             yield self._create_event(
                 DeepSearchEventType.STARTED,
                 {"query": request.query},
                 "研究流程已启动"
             )
             
-            # 检查是否已被取消（统一由 engine 管理）
             if connection_id and is_connection_cancelled(connection_id):
                 yield self._create_event(
                     DeepSearchEventType.CANCELLED,
@@ -111,19 +114,39 @@ class DeepSearchService:
                 )
                 return
             
-            # 构建初始状态
-            state = self._build_initial_state(request)
+            initial_state = self._build_initial_state(request)
             
-            # 跟踪最终状态是否获取
-            final_state = None
-            # 跟踪是否已发送 WEB_SEARCHING 事件
+            accumulated_state = initial_state.copy()
+            
             web_searching_sent = False
             
-            # 使用 astream 流式执行，传递connection_id到config
             config = RunnableConfig(configurable={"connection_id": connection_id}) if connection_id else RunnableConfig()
             
-            async for chunk in graph.astream(state, config=config):
-                # **优先检查取消状态**
+            async for chunk in graph.astream(initial_state, config=config):
+                chunk_count += 1
+                current_time = time.time()
+                
+                if connection_id and (current_time - last_connection_check_time) >= connection_check_interval:
+                    last_connection_check_time = current_time
+                    if is_connection_cancelled(connection_id):
+                        logger.info(f"定期检查检测到取消信号 [连接: {connection_id}]，停止流式执行")
+                        yield self._create_event(
+                            DeepSearchEventType.CANCELLED,
+                            {"message": "用户取消了研究流程"},
+                            "研究流程已取消"
+                        )
+                        return
+                
+                if connection_id and (current_time - last_heartbeat_time) >= heartbeat_interval:
+                    last_heartbeat_time = current_time
+                    yield self._create_progress_event(
+                        step_name="处理中",
+                        completed=0,
+                        total=100,
+                        percentage=0.0
+                    )
+                    logger.debug(f"发送心跳事件 [连接: {connection_id}]")
+                
                 if connection_id and is_connection_cancelled(connection_id):
                     logger.info(f"检测到取消信号 [连接: {connection_id}]，停止流式执行")
                     yield self._create_event(
@@ -133,9 +156,7 @@ class DeepSearchService:
                     )
                     return
                 
-                # 解析每个步骤的输出
                 for node_name, node_output in chunk.items():
-                    # **在处理每个节点输出前再次检查取消状态**
                     if connection_id and is_connection_cancelled(connection_id):
                         logger.info(f"在处理节点 {node_name} 时检测到取消信号 [连接: {connection_id}]")
                         yield self._create_event(
@@ -147,7 +168,30 @@ class DeepSearchService:
                     
                     logger.info(f"节点 {node_name} 输出: {list(node_output.keys())}")
                     
-                    # 研究计划生成
+                    for key, value in node_output.items():
+                        if key in accumulated_state:
+                            if key in ["messages", "search_query", "sources_gathered", "all_sources_gathered", "web_research_result"]:
+                                if isinstance(accumulated_state[key], list) and isinstance(value, list):
+                                    if key == "messages":
+                                        existing_contents = {msg.content for msg in accumulated_state[key] if hasattr(msg, 'content')}
+                                        for msg in value:
+                                            if hasattr(msg, 'content') and msg.content not in existing_contents:
+                                                accumulated_state[key].append(msg)
+                                                existing_contents.add(msg.content)
+                                    else:
+                                        accumulated_state[key].extend(value)
+                                elif isinstance(accumulated_state[key], list):
+                                    accumulated_state[key].append(value)
+                            elif isinstance(accumulated_state[key], list) and isinstance(value, list):
+                                existing_items = set(accumulated_state[key]) if accumulated_state[key] else set()
+                                for item in value:
+                                    if item not in existing_items:
+                                        accumulated_state[key].append(item)
+                            else:
+                                accumulated_state[key] = value
+                        else:
+                            accumulated_state[key] = value
+                    
                     if node_name == "generate_research_plan":
                         if "research_plan" in node_output:
                             plan = node_output["research_plan"]
@@ -167,7 +211,6 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("研究计划已制定", 1, 8, 12.5)
                     
-                    # 查询生成
                     elif node_name == "generate_query":
                         if "search_query" in node_output:
                             queries = node_output["search_query"]
@@ -183,9 +226,7 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("搜索查询已生成", 2, 8, 25.0)
                     
-                    # 网络搜索
                     elif node_name == "web_research":
-                        # 首次进入 web_research 节点时发送 WEB_SEARCHING 事件
                         if not web_searching_sent:
                             yield self._create_event(
                                 DeepSearchEventType.WEB_SEARCHING,
@@ -194,13 +235,10 @@ class DeepSearchService:
                             )
                             web_searching_sent = True
                         
-                        # 发送搜索中的进度事件
                         yield self._create_progress_event("正在搜索网络资源", 3, 8, 37.5)
                         
-                        # 提取搜索到的资源并发送
                         if "sources_gathered" in node_output:
                             sources = node_output["sources_gathered"]
-                            # 构建资源列表数据
                             sources_data = []
                             for source in sources:
                                 if isinstance(source, dict):
@@ -209,7 +247,6 @@ class DeepSearchService:
                                         "url": source.get("value", "")
                                     })
                             
-                            # 发送搜索结果事件
                             yield self._create_event(
                                 DeepSearchEventType.WEB_RESULT,
                                 {
@@ -219,7 +256,6 @@ class DeepSearchService:
                                 f"找到 {len(sources_data)} 个网络资源"
                             )
                     
-                    # 反思评估
                     elif node_name == "reflection":
                         if "is_sufficient" in node_output:
                             yield self._create_event(
@@ -235,7 +271,6 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("反思评估完成", 4, 8, 50.0)
                     
-                    # 质量评估
                     elif node_name == "assess_content_quality":
                         if "content_quality" in node_output:
                             yield self._create_event(
@@ -246,7 +281,6 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("质量评估完成", 5, 8, 62.5)
                     
-                    # 事实验证
                     elif node_name == "verify_facts":
                         if "fact_verification" in node_output:
                             yield self._create_event(
@@ -257,7 +291,6 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("事实验证完成", 6, 8, 75.0)
                     
-                    # 相关性评估
                     elif node_name == "assess_relevance":
                         if "relevance_assessment" in node_output:
                             yield self._create_event(
@@ -268,7 +301,6 @@ class DeepSearchService:
                         
                         yield self._create_progress_event("相关性评估完成", 7, 8, 87.5)
                     
-                    # 总结优化
                     elif node_name == "optimize_summary":
                         if "summary_optimization" in node_output:
                             yield self._create_event(
@@ -277,24 +309,12 @@ class DeepSearchService:
                                 "总结优化完成"
                             )
                     
-                    # 最终答案
                     elif node_name == "finalize_answer":
                         yield self._create_progress_event("生成最终报告", 8, 8, 100.0)
-                        
-                        # 从流式执行的最后一个状态中获取最终结果
-                        final_state = node_output
             
-            # 使用流式执行中获取的最终状态构建响应，避免重复执行
-            if final_state:
-                response = self._build_response(request, final_state)
-            else:
-                # 如果流式执行没有到达最终节点，则重新获取最终状态
-                logger.warning("流式执行未完成，使用重新获取的最终状态")
-                config = RunnableConfig(configurable={"connection_id": connection_id}) if connection_id else RunnableConfig()
-                final_state = await graph.ainvoke(state, config=config)
-                response = self._build_response(request, final_state)
+            logger.info(f"流式执行完成，使用累积状态构建响应（已处理 {chunk_count} 个chunk）")
+            response = self._build_response(request, accumulated_state)
             
-            # 发送报告生成完成事件
             yield self._create_event(
                 DeepSearchEventType.REPORT_GENERATED,
                 {
@@ -305,7 +325,6 @@ class DeepSearchService:
                 "研究报告已生成"
             )
             
-            # 发送完成事件
             yield self._create_event(
                 DeepSearchEventType.COMPLETED,
                 response.model_dump(),
@@ -320,7 +339,6 @@ class DeepSearchService:
                 f"执行失败: {str(e)}"
             )
         finally:
-            # 取消状态清理由 endpoint 统一负责（engine 层统一管理）
             pass
     
     def _build_initial_state(self, request: DeepSearchRequest) -> Dict[str, Any]:
@@ -344,13 +362,11 @@ class DeepSearchService:
         result_state: Dict[str, Any]
     ) -> DeepSearchResponse:
         """构建响应对象."""
-        # 提取答案
         answer_text = ""
         messages = result_state.get("messages") or []
         if messages:
             answer_text = messages[-1].content or ""
         
-        # 提取被引用的来源（使用 URL+标题组合去重）
         sources_list = []
         sources_gathered = result_state.get("sources_gathered") or []
         seen_source_combinations = set()
@@ -359,7 +375,6 @@ class DeepSearchService:
                 url = source.get("value")
                 label = source.get("label", "")
                 
-                # 创建 URL+标题的组合键（标准化处理）
                 normalized_url = url.rstrip('/') if url else ""
                 normalized_label = " ".join(label.lower().split()) if label else ""
                 combination_key = (normalized_url, normalized_label)
@@ -374,23 +389,17 @@ class DeepSearchService:
                         )
                     )
         
-        # 提取所有搜索到的来源
         all_sources_list = []
         all_sources_gathered = result_state.get("all_sources_gathered") or []
-        # 使用 URL+标题组合去重，避免不同短链/相同落地页或相同URL但不同标题的重复
         seen_combinations = set()
         for source in all_sources_gathered:
             if isinstance(source, dict):
                 url = source.get("value")
                 label = source.get("label", "")
                 
-                # 创建 URL+标题的组合键（标准化处理）
-                # 标准化 URL：移除末尾的 / 和 URL 参数（可选）
                 normalized_url = url.rstrip('/') if url else ""
-                # 标准化标题：转小写，去除多余空格
                 normalized_label = " ".join(label.lower().split()) if label else ""
                 
-                # 组合键：URL + 标题
                 combination_key = (normalized_url, normalized_label)
                 
                 if url and combination_key not in seen_combinations:
@@ -403,7 +412,6 @@ class DeepSearchService:
                         )
                     )
         
-        # 生成 Markdown 报告
         markdown_report = ""
         if request.report_format.value == "formal":
             markdown_report = report_generator.generate_formal_report(
@@ -423,10 +431,8 @@ class DeepSearchService:
                 }
             )
         else:
-            # 普通格式
             markdown_report = self._generate_casual_report(answer_text, sources_gathered)
         
-        # 构建元数据
         metadata = {
             "research_loop_count": result_state.get("research_loop_count", 0),
             "number_of_queries": len(result_state.get("search_query", [])),
