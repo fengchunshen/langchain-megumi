@@ -13,6 +13,7 @@ from typing_extensions import Annotated
 from langgraph.graph import add_messages
 import operator
 import logging
+from app.core.logger import jinfo, jdebug, jwarn, jerror
 
 from app.core.config import settings
 
@@ -69,10 +70,10 @@ async def reset_degradation_status(connection_id: Optional[str] = None):
         if connection_id:
             if connection_id in _connection_degradations:
                 del _connection_degradations[connection_id]
-                logger.info(f"【降级状态】连接 {connection_id} 的降级状态已重置，将重新尝试 Gemini")
+                jinfo(logger, "连接已重置，准备重试 Gemini", 分类="连接降级恢复", 连接ID=connection_id)
         else:
             _connection_degradations.clear()
-            logger.info("【降级状态】所有连接的降级状态已重置，将重新尝试 Gemini")
+            jinfo(logger, "所有连接已重置，准备重试 Gemini", 分类="连接降级恢复(全部)")
 
 
 async def is_connection_degraded(connection_id: Optional[str] = None) -> bool:
@@ -102,7 +103,7 @@ async def set_connection_degraded(connection_id: Optional[str] = None):
         return
     async with _degradations_lock:
         _connection_degradations[connection_id] = True
-        logger.warning(f"【降级状态】连接 {connection_id} 已设置为降级状态，后续调用将直接使用 Qwen3Max")
+        jwarn(logger, "连接已标记为降级，切换至 Qwen3Max", 分类="连接降级", 连接ID=connection_id)
 
 
 async def set_connection_cancelled(connection_id: str):
@@ -114,7 +115,7 @@ async def set_connection_cancelled(connection_id: str):
             event = asyncio.Event()
             _connection_cancellations[connection_id] = event
         event.set()
-    logger.info(f"【取消状态】连接 {connection_id} 已被标记为取消")
+    jinfo(logger, "连接已标记为取消", 分类="取消连接", 连接ID=connection_id)
 
 
 def is_connection_cancelled(connection_id: str) -> bool:
@@ -130,13 +131,13 @@ async def cleanup_connection_cancellation(connection_id: str):
     async with _cancellations_lock:
         if connection_id in _connection_cancellations:
             del _connection_cancellations[connection_id]
-    logger.info(f"【取消状态】连接 {connection_id} 的取消状态已清理")
+    jinfo(logger, "连接状态已清理", 分类="取消清理", 连接ID=connection_id)
 
 
 def check_cancellation_and_raise(connection_id: Optional[str] = None):
     """检查取消状态，如果被取消则抛出CancelledError."""
     if connection_id and is_connection_cancelled(connection_id):
-        logger.info(f"【取消检查】连接 {connection_id} 已被取消，停止执行")
+        jinfo(logger, "检测到连接已取消，停止执行", 分类="取消检查", 连接ID=connection_id)
         raise asyncio.CancelledError(f"连接 {connection_id} 已被取消")
 
 
@@ -148,7 +149,7 @@ def get_qwen_base_url() -> str:
     base_url = base_url.rstrip('/')
     if not base_url.endswith('/v1'):
         base_url = f"{base_url}/v1"
-    logger.debug(f"Qwen3Max API base URL: {base_url}")
+    jdebug(logger, "Qwen3Max API 基础地址", 分类="模型配置", 基础地址=base_url)
     return base_url
 
 
@@ -160,7 +161,7 @@ def get_gemini_base_url() -> str:
     base_url = base_url.rstrip('/')
     if not base_url.endswith('/v1'):
         base_url = f"{base_url}/v1"
-    logger.debug(f"Gemini API base URL: {base_url}")
+    jdebug(logger, "Gemini API 基础地址", 分类="模型配置", 基础地址=base_url)
     return base_url
 
 
@@ -189,13 +190,13 @@ def create_llm_with_fallback(
     if use_gemini:
         base_url = get_gemini_base_url()
         api_key = settings.GEMINI_API_KEY
-        logger.debug(f"创建 Gemini LLM 实例: {model}")
+        jdebug(logger, "创建 Gemini LLM 实例", 分类="模型实例化", 模型=model)
     else:
         base_url = get_qwen_base_url()
         api_key = settings.DASHSCOPE_API_KEY
         if not api_key:
             raise ValueError("DASHSCOPE_API_KEY is not set")
-        logger.debug(f"创建 Qwen3Max LLM 实例: {model}")
+        jdebug(logger, "创建 Qwen3Max LLM 实例", 分类="模型实例化", 模型=model)
     
     return ChatOpenAI(
         model=model,
@@ -248,7 +249,7 @@ async def invoke_llm_with_fallback(
     is_degraded = await is_connection_degraded(connection_id)
     
     if is_degraded:
-        logger.info(f"【节点: {node_name}】已降级，直接使用 Qwen3Max ({qwen_model})...")
+        jinfo(logger, "节点降级，改用 Qwen3Max", 分类="模型降级", 节点=node_name, 备用模型=qwen_model)
         try:
             check_cancellation_and_raise(connection_id)
             
@@ -266,10 +267,10 @@ async def invoke_llm_with_fallback(
             result = await _maybe if inspect.isawaitable(_maybe) else _maybe
             
             check_cancellation_and_raise(connection_id)
-            logger.info(f"【节点: {node_name}】Qwen3Max 调用成功")
+            jinfo(logger, "Qwen3Max 调用成功", 分类="模型调用成功", 节点=node_name)
             return result
         except Exception as e:
-            logger.error(f"【节点: {node_name}】Qwen3Max 调用失败: {str(e)}", exc_info=True)
+            jerror(logger, "Qwen3Max 调用失败", 分类="模型调用失败", 节点=node_name, 错误=str(e))
             raise e
     
     last_error = None
@@ -279,7 +280,7 @@ async def invoke_llm_with_fallback(
             
             base_url = get_gemini_base_url()
             api_key = settings.GEMINI_API_KEY
-            logger.info(f"【节点: {node_name}】尝试使用 Gemini ({gemini_model})...")
+            jinfo(logger, "尝试调用 Gemini", 分类="模型切换", 节点=node_name, 模型=gemini_model)
             
             llm = ChatOpenAI(
                 model=gemini_model,
@@ -294,24 +295,24 @@ async def invoke_llm_with_fallback(
             if structured_output_type is not None:
                 llm = llm.with_structured_output(structured_output_type)
             
-            logger.info(f"【节点: {node_name}】Gemini 调用开始...")
+            jinfo(logger, "Gemini 调用开始", 分类="模型调用开始", 节点=node_name)
             
             _maybe = invoke_func(llm)
             result = await _maybe if inspect.isawaitable(_maybe) else _maybe
             
             check_cancellation_and_raise(connection_id)
-            logger.info(f"【节点: {node_name}】Gemini 调用成功")
+            jinfo(logger, "Gemini 调用成功", 分类="模型调用成功", 节点=node_name)
             return result
             
         except Exception as e:
             last_error = e
-            logger.warning(f"【节点: {node_name}】Gemini 调用失败 (尝试 {attempt + 1}/2): {str(e)}", exc_info=False)
+            jwarn(logger, "Gemini 调用失败", 分类="模型调用失败", 节点=node_name, 尝试次数=attempt + 1, 最大次数=2, 错误=str(e))
             
             if attempt == 0:
-                logger.info(f"【节点: {node_name}】Gemini 第 1 次重试...")
+                jinfo(logger, "Gemini 第一次重试", 分类="模型重试", 节点=node_name, 重试次数=1)
                 check_cancellation_and_raise(connection_id)
             else:
-                logger.warning(f"【节点: {node_name}】Gemini 重试{attempt}次后仍失败，切换到 Qwen3Max ({qwen_model})...")
+                jwarn(logger, "Gemini 持续失败，切换至 Qwen3Max", 分类="模型切换", 节点=node_name, 备用模型=qwen_model)
                 
                 check_cancellation_and_raise(connection_id)
                 
@@ -329,7 +330,7 @@ async def invoke_llm_with_fallback(
                 )
     
     # 如果到这里，说明所有尝试都失败了
-    logger.error(f"【节点: {node_name}】所有模型调用都失败，最后错误: {last_error}")
+    jerror(logger, "所有模型调用均失败", 分类="模型全部失败", 节点=node_name, 错误=str(last_error))
     raise last_error
 
 
@@ -390,20 +391,20 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
         elif isinstance(config, dict):
             connection_id = config.get("configurable", {}).get("connection_id")
     
-    logger.info("【节点: generate_research_plan】开始生成研究方案...")
+    jinfo(logger, "开始生成研究计划", 节点="生成研究计划")
     
     check_cancellation_and_raise(connection_id)
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
     research_topic = get_research_topic(state["messages"])
-    logger.info(f"【节点: generate_research_plan】研究主题: {research_topic[:200]}...")
+    jinfo(logger, "研究主题", 节点="生成研究计划", 主题=research_topic[:200])
     
     formatted_prompt = research_plan_instructions.format(
         research_topic=research_topic
     )
     
-    logger.info("【节点: generate_research_plan】调用 LLM 生成方案...")
+    jinfo(logger, "调用 LLM 生成计划", 节点="生成研究计划")
     try:
         plan = await invoke_llm_with_fallback(
             invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
@@ -414,16 +415,16 @@ async def generate_research_plan(state: OverallState, config: RunnableConfig) ->
             connection_id=connection_id
         )
         check_cancellation_and_raise(connection_id)
-        logger.info(f"【节点: generate_research_plan】研究方案生成完毕，包含 {len(plan.sub_topics)} 个子主题")
-        logger.info(f"【节点: generate_research_plan】研究问题总数: {len(plan.research_questions)}")
+        jinfo(logger, "子主题数量", 节点="生成研究计划", 数量=len(plan.sub_topics))
+        jinfo(logger, "研究问题数量", 节点="生成研究计划", 数量=len(plan.research_questions))
         for idx, sub_topic in enumerate(plan.sub_topics, 1):
-            logger.info(f"【节点: generate_research_plan】  子主题 {idx}: {sub_topic}")
+            jinfo(logger, "子主题", 节点="生成研究计划", 序号=idx, 子主题=sub_topic)
         return {"research_plan": plan}
     except asyncio.CancelledError:
-        logger.info("【节点: generate_research_plan】检测到取消，终止节点执行")
+        jinfo(logger, "任务已取消，停止生成计划", 节点="生成研究计划")
         raise
     except Exception as e:
-        logger.error(f"【节点: generate_research_plan】生成方案失败: {e}", exc_info=True)
+        jerror(logger, "生成研究计划失败", 节点="生成研究计划", 错误=str(e))
         return {"research_plan": None}
 
 
@@ -437,13 +438,13 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info("【节点: generate_query】开始生成搜索查询...")
+    jinfo(logger, "开始生成查询", 节点="生成查询")
     
     unanswered_questions = state.get("unanswered_questions", [])
     is_targeted_mode = len(unanswered_questions) > 0
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
-    logger.info(f"【节点: generate_query】使用模型: {reasoning_model}")
+    jinfo(logger, "推理模型", 节点="生成查询", 模型=reasoning_model)
     
     research_topic = get_research_topic(state["messages"])
     research_plan = state.get("research_plan")
@@ -465,10 +466,10 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
         plan_str += f"\n理由: {research_plan.rationale}"
     
     if is_targeted_mode:
-        logger.info(f"【节点: generate_query】运行模式: 针对性（Targeted）")
-        logger.info(f"【节点: generate_query】未回答问题数量: {len(unanswered_questions)}")
+        jinfo(logger, "模式：针对未解问题", 节点="生成查询")
+        jinfo(logger, "未解问题数量", 节点="生成查询", 数量=len(unanswered_questions))
         for idx, question in enumerate(unanswered_questions[:3], 1):
-            logger.info(f"【节点: generate_query】  未回答问题 {idx}: {question[:100]}...")
+            jinfo(logger, "未解问题", 节点="生成查询", 序号=idx, 问题=question[:100])
         
         max_queries = min(len(unanswered_questions) * 2, state.get("initial_search_query_count", 3))
         
@@ -484,14 +485,14 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
 {unanswered_text}
 """
     else:
-        logger.info(f"【节点: generate_query】运行模式: 首次（Initial）")
+        jinfo(logger, "模式：初始探索", 节点="生成查询")
         initial_count = state.get("initial_search_query_count")
         if initial_count is None:
             initial_count = 3
             state["initial_search_query_count"] = initial_count
-        logger.info(f"【节点: generate_query】初始搜索查询数量: {initial_count}")
+        jinfo(logger, "初始查询数量", 节点="生成查询", 数量=initial_count)
         if research_plan:
-            logger.info(f"【节点: generate_query】基于方案 '{research_plan.research_topic}' 生成查询")
+            jinfo(logger, "基于研究计划生成查询", 节点="生成查询", 主题=research_plan.research_topic)
         
         max_queries = initial_count
         mode_instruction = """**首次运行模式 (Initial Mode):**
@@ -504,8 +505,8 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
 - Don't generate multiple similar queries, 1 is enough.
 """
     
-    logger.info(f"【节点: generate_query】目标查询数量: {max_queries}")
-    logger.info(f"【节点: generate_query】研究主题: {research_topic[:200]}...")
+    jinfo(logger, "目标查询数量", 节点="生成查询", 数量=max_queries)
+    jinfo(logger, "研究主题", 节点="生成查询", 主题=research_topic[:200])
     
     formatted_prompt = query_writer_instructions.format(
         current_date=get_current_date(),
@@ -515,7 +516,7 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
         number_queries=max_queries,
     )
     
-    logger.info(f"【节点: generate_query】调用 LLM 生成查询...")
+    jinfo(logger, "调用 LLM 生成查询", 节点="生成查询")
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="generate_query",
@@ -527,9 +528,9 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     check_cancellation_and_raise(connection_id)
     
     query_count = len(result.query) if result.query else 0
-    logger.info(f"【节点: generate_query】成功生成 {query_count} 个搜索查询")
+    jinfo(logger, "生成查询条数", 节点="生成查询", 数量=query_count)
     for idx, query_item in enumerate(result.query[:5], 1):  # 只记录前5个
-        logger.info(f"【节点: generate_query】  查询 {idx}: {query_item[:100]}...")
+        jinfo(logger, "查询样本", 节点="生成查询", 序号=idx, 查询=query_item[:100])
     
     # 返回两个字段：search_query 用于累积（历史记录），new_search_query 用于本轮执行
     return {"search_query": result.query, "new_search_query": result.query}
@@ -538,7 +539,7 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
 def continue_to_web_research(state: QueryGenerationState):
     new_queries = state.get("new_search_query", [])
     query_count = len(new_queries)
-    logger.info(f"【节点: continue_to_web_research】准备分发 {query_count} 个搜索任务到 web_research 节点")
+    jinfo(logger, "分发到网络研究任务", 节点="继续到网络研究", 任务数量=query_count)
     return [
         Send("web_research", {"search_query": search_query, "id": int(idx)})
         for idx, search_query in enumerate(new_queries)
@@ -630,28 +631,28 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     search_query = state["search_query"]
     search_id = state["id"]
     
-    logger.info(f"【节点: web_research】开始执行搜索任务 ID={search_id}")
-    logger.info(f"【节点: web_research】搜索查询: {search_query[:200]}...")
+    jinfo(logger, "开始网络研究", 节点="网络研究", 任务ID=search_id)
+    jinfo(logger, "研究查询", 节点="网络研究", 查询=search_query[:200])
     
-    logger.info(f"【节点: web_research】调用博查搜索 API...")
+    jinfo(logger, "调用博查搜索 API", 节点="网络研究")
     search_result = await bocha_web_search(query=search_query, count=10)
     
     webpages = search_result.get("webpages", [])
     formatted_text = search_result.get("formatted_text", "")
     
     webpage_count = len(webpages) if webpages else 0
-    logger.info(f"【节点: web_research】搜索完成，找到 {webpage_count} 个网页结果")
+    jinfo(logger, "搜索完成", 节点="网络研究", 网页数量=webpage_count)
     
     if webpage_count > 0:
-        logger.info(f"【节点: web_research】前3个结果标题:")
+        jinfo(logger, "Top3 标题", 节点="网络研究")
         for idx, page in enumerate(webpages[:3], 1):
-            logger.info(f"【节点: web_research】  {idx}. {page.get('name', 'N/A')[:100]}")
+            jinfo(logger, "标题", 节点="网络研究", 序号=idx, 标题=page.get("name", "N/A")[:100])
     
     top_k = min(settings.WEB_SCRAPE_TOP_K, len(webpages))
     top_pages = webpages[:top_k]
     top_urls = [p.get("url") for p in top_pages if p.get("url")]
     
-    logger.info(f"【节点: web_research】准备深度抓取 Top-{top_k} 网页...")
+    jinfo(logger, "深度抓取开始", 节点="网络研究", TopK=top_k)
     
     deep_docs = []
     if top_urls:
@@ -673,10 +674,10 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
                     text = url_to_text[url]
                     deep_docs.append((i, title, url, text))
             
-            logger.info(f"【节点: web_research】成功深度抓取 {len(deep_docs)}/{top_k} 个网页")
+            jinfo(logger, "深度抓取进度", 节点="网络研究", 已抓取=len(deep_docs), 目标=top_k)
             
         except Exception as e:
-            logger.error(f"【节点: web_research】深度抓取失败: {e}", exc_info=True)
+            jerror(logger, "深度抓取失败", 节点="网络研究", 错误=str(e))
     
     context_for_llm = ""
     
@@ -697,18 +698,12 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         )
         context_for_llm = deep_context
         
-        logger.info(
-            f"【节点: web_research】使用深度正文作为上下文，"
-            f"总长度: {len(context_for_llm)} 字符"
-        )
+        jinfo(logger, "使用深度内容", 节点="网络研究", 内容长度=len(context_for_llm))
     else:
         context_for_llm = formatted_text
-        logger.warning(
-            f"【节点: web_research】深度抓取失败或无结果，"
-            f"回退使用博查搜索摘要"
-        )
+        jwarn(logger, "深度内容不可用，回退至博查摘要", 节点="网络研究")
     
-    logger.info(f"【节点: web_research】开始使用 LLM 总结搜索结果...")
+    jinfo(logger, "使用 LLM 总结", 节点="网络研究")
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
         research_topic=search_query,
@@ -721,7 +716,7 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
     )
     full_prompt = formatted_prompt + search_context
 
-    logger.info(f"【节点: web_research】调用 LLM API，提示词长度: {len(full_prompt)} 字符")
+    jinfo(logger, "LLM 提示长度", 节点="网络研究", 长度=len(full_prompt))
     llm_response = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(full_prompt),
         node_name="web_research",
@@ -729,9 +724,9 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
         temperature=0,
         connection_id=connection_id
     )
-    logger.info(f"【节点: web_research】LLM 总结完成，响应长度: {len(llm_response.content)} 字符")
+    jinfo(logger, "LLM 摘要长度", 节点="网络研究", 长度=len(llm_response.content))
     
-    logger.info(f"【节点: web_research】开始处理引用和来源...")
+    jinfo(logger, "处理引文与来源", 节点="网络研究")
     
     pages_for_citation = top_pages if deep_docs else webpages
     
@@ -761,13 +756,8 @@ async def web_research(state: WebSearchState, config: RunnableConfig) -> Overall
                 "value": url,
             })
     
-    logger.info(
-        f"【节点: web_research】处理完成，"
-        f"生成 {len(citations)} 个引用，"
-        f"{len(sources_gathered)} 个深度来源，"
-        f"{len(all_sources)} 个候选来源"
-    )
-    logger.info(f"【节点: web_research】搜索任务 ID={search_id} 完成")
+    jinfo(logger, "处理完成", 节点="网络研究", 引文数量=len(citations), 深度来源数量=len(sources_gathered), 全部来源数量=len(all_sources))
+    jinfo(logger, "任务完成", 节点="网络研究", 任务ID=search_id)
 
     return {
         "sources_gathered": sources_gathered,
@@ -791,12 +781,12 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
     loop_count = state["research_loop_count"]
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: reflection】开始反思，研究循环次数: {loop_count}")
-    logger.info(f"【节点: reflection】使用模型: {reasoning_model}")
+    jinfo(logger, "开始反思评估", 节点="反思", 循环次数=loop_count)
+    jinfo(logger, "推理模型", 节点="反思", 模型=reasoning_model)
     
     web_research_results = state.get("web_research_result", [])
     search_queries = state.get("search_query", [])
-    logger.info(f"【节点: reflection】当前已有 {len(web_research_results)} 个搜索结果，{len(search_queries)} 个搜索查询")
+    jinfo(logger, "输入规模", 节点="反思", 研究结果=len(web_research_results), 查询数量=len(search_queries))
 
     research_plan = state.get("research_plan")
     plan_str = "无特定研究计划"
@@ -809,7 +799,7 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
         for i, question in enumerate(research_plan.research_questions, 1):
             plan_str += f"{i}. {question}\n"
         plan_str += f"\n理由: {research_plan.rationale}"
-        logger.info(f"【节点: reflection】使用研究计划进行对照评估，包含 {len(research_plan.research_questions)} 个问题")
+        jinfo(logger, "使用研究计划", 节点="反思", 问题数量=len(research_plan.research_questions))
 
     formatted_prompt = reflection_instructions.format(
         research_topic=get_research_topic(state["messages"]),
@@ -818,7 +808,7 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
     
-    logger.info("【节点: reflection】调用 LLM 进行反思评估（对照研究计划）...")
+    jinfo(logger, "调用 LLM 进行充分性评估", 节点="反思")
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
         node_name="reflection",
@@ -828,20 +818,15 @@ async def reflection(state: OverallState, config: RunnableConfig) -> ReflectionS
         connection_id=connection_id
     )
 
-    logger.info(f"【节点: reflection】=== 信息充足性评估结果 ===")
-    logger.info(f"【节点: reflection】  当前循环: 第 {loop_count} 轮")
-    logger.info(f"【节点: reflection】  信息是否充足: {result.is_sufficient}")
-    
-    if result.is_sufficient:
-        logger.info(f"【节点: reflection】  ✅ 评估结果: 信息已充足，可以开始生成报告")
-    else:
-        logger.info(f"【节点: reflection】  ⚠️  评估结果: 信息不足，需要继续研究")
-        logger.info(f"【节点: reflection】  知识缺口: {result.knowledge_gap[:200] if result.knowledge_gap else 'N/A'}...")
-        unanswered_count = len(result.unanswered_questions) if result.unanswered_questions else 0
-        logger.info(f"【节点: reflection】  未回答问题数量: {unanswered_count}")
-        if unanswered_count > 0:
-            for idx, question in enumerate(result.unanswered_questions[:3], 1):  # 只记录前3个
-                logger.info(f"【节点: reflection】    未回答问题 {idx}: {question[:100]}...")
+    jinfo(logger, "充分性评估完成", 节点="反思")
+    jinfo(logger, "循环计数", 节点="反思", 当前循环=loop_count)
+    jinfo(logger, "是否充分", 节点="反思", 充分=result.is_sufficient)
+    jinfo(logger, "知识缺口", 节点="反思", 缺口=(result.knowledge_gap[:200] if result.knowledge_gap else "N/A"))
+    unanswered_count = len(result.unanswered_questions) if result.unanswered_questions else 0
+    jinfo(logger, "未解问题数量", 节点="反思", 数量=unanswered_count)
+    if unanswered_count > 0:
+        for idx, question in enumerate(result.unanswered_questions[:3], 1):  # 只记录前3个
+            jinfo(logger, "未解问题", 节点="反思", 序号=idx, 问题=question[:100])
 
     return {
         "is_sufficient": result.is_sufficient,
@@ -858,23 +843,21 @@ def evaluate_research(state: ReflectionState, config: RunnableConfig) -> str:
     loop_count = state["research_loop_count"]
     is_sufficient = state["is_sufficient"]
     
-    logger.info(f"【节点: evaluate_research】=== 研究状态决策 ===")
-    logger.info(f"【节点: evaluate_research】  当前循环次数: {loop_count}/{max_research_loops}")
-    logger.info(f"【节点: evaluate_research】  信息是否充足: {is_sufficient}")
+    jinfo(logger, "做出研究循环决策", 节点="评估研究")
+    jinfo(logger, "循环进度", 节点="评估研究", 当前循环=loop_count, 最大循环=max_research_loops)
+    jinfo(logger, "是否充分", 节点="评估研究", 充分=is_sufficient)
     
     if state["is_sufficient"]:
-        logger.info(f"【节点: evaluate_research】✅ 决策: 信息已充足，结束调查循环")
-        logger.info(f"【节点: evaluate_research】➡️  下一步: 开始质量评估和报告生成流程")
+        jinfo(logger, "进入质量评估与报告阶段", 节点="评估研究")
         return "assess_content_quality"
     elif state["research_loop_count"] >= max_research_loops:
-        logger.info(f"【节点: evaluate_research】⚠️  决策: 已达到最大循环次数 ({max_research_loops})，强制结束")
-        logger.info(f"【节点: evaluate_research】➡️  下一步: 基于现有信息生成报告")
+        jinfo(logger, "达到最大循环次数，进入报告阶段", 节点="评估研究", 最大循环=max_research_loops)
         return "assess_content_quality"
     else:
         unanswered_questions = state.get("unanswered_questions", [])
         unanswered_count = len(unanswered_questions)
-        logger.info(f"【节点: evaluate_research】🔄 决策: 信息不足，继续第 {loop_count + 1} 轮调查")
-        logger.info(f"【节点: evaluate_research】➡️  下一步: 生成针对 {unanswered_count} 个未回答问题的新查询")
+        jinfo(logger, "尚未充分，继续下一循环", 节点="评估研究", 下次循环=loop_count + 1)
+        jinfo(logger, "为未解问题生成查询", 节点="评估研究", 未解问题数量=unanswered_count)
         return "generate_query"
 
 
@@ -889,7 +872,7 @@ async def assess_content_quality(state: OverallState, config: RunnableConfig):
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info(f"【节点: assess_content_quality】开始内容质量评估")
+    jinfo(logger, "开始内容质量评估", 节点="评估内容质量")
     
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
@@ -900,7 +883,7 @@ async def assess_content_quality(state: OverallState, config: RunnableConfig):
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: assess_content_quality】使用模型: {reasoning_model}")
+    jinfo(logger, "推理模型", 节点="评估内容质量", 模型=reasoning_model)
     
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
@@ -911,8 +894,8 @@ async def assess_content_quality(state: OverallState, config: RunnableConfig):
         connection_id=connection_id
     )
     
-    logger.info(f"【节点: assess_content_quality】质量评分: {result.quality_score}")
-    logger.info(f"【节点: assess_content_quality】内容空白数量: {len(result.content_gaps)}")
+    jinfo(logger, "质量评分", 节点="评估内容质量", 分数=result.quality_score)
+    jinfo(logger, "内容缺口数量", 节点="评估内容质量", 数量=len(result.content_gaps))
     
     return {
         "content_quality": {
@@ -935,7 +918,7 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info(f"【节点: verify_facts】开始事实验证")
+    jinfo(logger, "开始事实核验", 节点="事实核验")
     
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
@@ -948,7 +931,7 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: verify_facts】使用模型: {reasoning_model}")
+    jinfo(logger, "推理模型", 节点="事实核验", 模型=reasoning_model)
     
     async def ainvoke_with_method(llm: ChatOpenAI):
         structured_llm = llm.with_structured_output(
@@ -966,9 +949,9 @@ async def verify_facts(state: OverallState, config: RunnableConfig):
         connection_id=connection_id
     )
     
-    logger.info(f"【节点: verify_facts】验证置信度: {result.confidence_score}")
-    logger.info(f"【节点: verify_facts】已验证事实数量: {len(result.verified_facts_text)}")
-    logger.info(f"【节点: verify_facts】争议声明数量: {len(result.disputed_claims_text)}")
+    jinfo(logger, "可信度评分", 节点="事实核验", 分数=result.confidence_score)
+    jinfo(logger, "已核事实数量", 节点="事实核验", 数量=len(result.verified_facts_text))
+    jinfo(logger, "存疑陈述数量", 节点="事实核验", 数量=len(result.disputed_claims_text))
     
     # 将扁平化的列表转换为字典列表
     verified_facts_dicts = [
@@ -1001,7 +984,7 @@ async def assess_relevance(state: OverallState, config: RunnableConfig):
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info(f"【节点: assess_relevance】开始相关性评估")
+    jinfo(logger, "开始相关性评估", 节点="评估相关性")
     
     combined_content = "\n\n---\n\n".join(state.get("web_research_result", []))
     
@@ -1012,7 +995,7 @@ async def assess_relevance(state: OverallState, config: RunnableConfig):
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: assess_relevance】使用模型: {reasoning_model}")
+    jinfo(logger, "推理模型", 节点="评估相关性", 模型=reasoning_model)
     
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
@@ -1023,9 +1006,9 @@ async def assess_relevance(state: OverallState, config: RunnableConfig):
         connection_id=connection_id
     )
     
-    logger.info(f"【节点: assess_relevance】相关性评分: {result.relevance_score}")
-    logger.info(f"【节点: assess_relevance】覆盖关键主题数量: {len(result.key_topics_covered)}")
-    logger.info(f"【节点: assess_relevance】缺失主题数量: {len(result.missing_topics)}")
+    jinfo(logger, "相关性得分", 节点="评估相关性", 分数=result.relevance_score)
+    jinfo(logger, "覆盖主题数量", 节点="评估相关性", 数量=len(result.key_topics_covered))
+    jinfo(logger, "缺失主题数量", 节点="评估相关性", 数量=len(result.missing_topics))
     
     return {
         "relevance_assessment": {
@@ -1048,7 +1031,7 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info(f"【节点: optimize_summary】开始摘要优化")
+    jinfo(logger, "开始优化总结", 节点="优化总结")
     
     original_summary = "\n\n---\n\n".join(state.get("web_research_result", []))
     
@@ -1064,7 +1047,7 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: optimize_summary】使用模型: {reasoning_model}")
+    jinfo(logger, "推理模型", 节点="优化总结", 模型=reasoning_model)
     
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
@@ -1080,10 +1063,10 @@ async def optimize_summary(state: OverallState, config: RunnableConfig):
     relevance_score = state.get("relevance_assessment", {}).get("relevance_score", 0.5)
     final_confidence = (quality_score + fact_confidence + relevance_score) / 3
     
-    logger.info(f"【节点: optimize_summary】关键洞察数量: {len(result.key_insights)}")
-    logger.info(f"【节点: optimize_summary】可行建议数量: {len(result.actionable_items)}")
-    logger.info(f"【节点: optimize_summary】置信度等级: {result.confidence_level}")
-    logger.info(f"【节点: optimize_summary】最终置信度评分: {final_confidence:.3f}")
+    jinfo(logger, "关键洞见数量", 节点="优化总结", 数量=len(result.key_insights))
+    jinfo(logger, "可执行项数量", 节点="优化总结", 数量=len(result.actionable_items))
+    jinfo(logger, "模型自信度", 节点="优化总结", 自信度=result.confidence_level)
+    jinfo(logger, "综合自信度", 节点="优化总结", 自信度=round(final_confidence, 3))
     
     return {
         "summary_optimization": {
@@ -1106,7 +1089,7 @@ async def generate_verification_report(state: OverallState, config: RunnableConf
     
     check_cancellation_and_raise(connection_id)
     
-    logger.info(f"【节点: generate_verification_report】开始生成验证报告")
+    jinfo(logger, "开始生成核验报告", 节点="生成核验报告")
     
     quality_data = state.get("content_quality", {})
     fact_data = state.get("fact_verification", {})
@@ -1143,7 +1126,7 @@ async def generate_verification_report(state: OverallState, config: RunnableConf
 - **最终置信度评分**: {state.get('final_confidence_score', 0):.3f}/1.0
 """
     
-    logger.info(f"【节点: generate_verification_report】验证报告生成完成")
+    jinfo(logger, "核验报告生成完成", 节点="生成核验报告")
     
     return {
         "verification_report": report
@@ -1163,12 +1146,12 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     
     reasoning_model = state.get("reasoning_model") or settings.GEMINI_MODEL
     
-    logger.info(f"【节点: finalize_answer】开始生成最终答案")
-    logger.info(f"【节点: finalize_answer】使用模型: {reasoning_model}")
+    jinfo(logger, "开始生成最终答复", 节点="生成最终答复")
+    jinfo(logger, "推理模型", 节点="生成最终答复", 模型=reasoning_model)
     
     web_research_results = state.get("web_research_result", [])
     sources_gathered = state.get("sources_gathered", [])
-    logger.info(f"【节点: finalize_answer】汇总 {len(web_research_results)} 个搜索结果，{len(sources_gathered)} 个数据源")
+    jinfo(logger, "输入规模", 节点="生成最终答复", 研究结果=len(web_research_results), 来源数量=len(sources_gathered))
 
     summaries = "\n---\n\n".join(web_research_results)
     
@@ -1176,8 +1159,8 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     key_insights = optimization_data.get("key_insights", [])
     actionable_items = optimization_data.get("actionable_items", [])
     
-    logger.info(f"【节点: finalize_answer】核心洞察数量: {len(key_insights)}")
-    logger.info(f"【节点: finalize_answer】可行建议数量: {len(actionable_items)}")
+    jinfo(logger, "关键洞见数量", 节点="生成最终答复", 数量=len(key_insights))
+    jinfo(logger, "可执行项数量", 节点="生成最终答复", 数量=len(actionable_items))
     
     prompt_enhancement = ""
     if key_insights or actionable_items:
@@ -1200,7 +1183,7 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
         summaries=summaries + prompt_enhancement
     )
     
-    logger.info("【节点: finalize_answer】调用 LLM 生成专业报告...")
+    jinfo(logger, "调用 LLM 生成报告", 节点="生成最终答复")
     
     result = await invoke_llm_with_fallback(
         invoke_func=lambda llm: llm.ainvoke(formatted_prompt),
@@ -1211,14 +1194,14 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     )
     final_report = result.content
     
-    logger.info(f"【节点: finalize_answer】LLM 生成完成，报告长度: {len(final_report)} 字符")
+    jinfo(logger, "报告长度", 节点="生成最终答复", 长度=len(final_report))
     
-    logger.info("【节点: finalize_answer】处理数据源引用...")
+    jinfo(logger, "处理引文", 节点="生成最终答复")
     import re
     
     citation_pattern = re.compile(r'\[(\d+)\]')
     found_citations = set(citation_pattern.findall(final_report))
-    logger.info(f"【节点: finalize_answer】扫描到 {len(found_citations)} 个引用编号: {sorted(found_citations, key=int)}")
+    jinfo(logger, "发现引文编号", 节点="生成最终答复", 引文编号=sorted(found_citations, key=int))
     
     enhanced_content = final_report
     for source in sources_gathered:
@@ -1243,10 +1226,10 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
         citation_to_source[citation_num] = source
         unique_sources.append(source)
     
-    logger.info(f"【节点: finalize_answer】共有 {len(unique_sources)} 个数据源")
+    jinfo(logger, "来源去重后数量", 节点="生成最终答复", 数量=len(unique_sources))
     
     if found_citations:
-        logger.info("【节点: finalize_answer】在报告末尾添加参考来源列表...")
+        jinfo(logger, "追加参考文献章节", 节点="生成最终答复")
         
         has_references = bool(re.search(r'#+\s*(参考来源|引用|来源|参考资料|References)', enhanced_content, re.IGNORECASE))
         
@@ -1263,18 +1246,17 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
                     url = source.get("value", "")
                     enhanced_content += f"{citation_num}. [{label}]({url})\n"
                 else:
-                    logger.warning(f"【节点: finalize_answer】引用编号 [{citation_num}] 没有对应的来源")
+                    jwarn(logger, "缺失对应来源的引文编号", 节点="生成最终答复", 引文编号=citation_num)
                     enhanced_content += f"{citation_num}. 来源未找到\n"
             
-            logger.info(f"【节点: finalize_answer】已添加 {len(sorted_citations)} 个参考来源")
+            jinfo(logger, "已添加参考文献数量", 节点="生成最终答复", 数量=len(sorted_citations))
         else:
-            logger.info("【节点: finalize_answer】报告已包含参考来源部分，跳过添加")
+            jinfo(logger, "参考文献章节已存在，跳过", 节点="生成最终答复")
     else:
-        logger.info("【节点: finalize_answer】报告中未找到引用编号，跳过添加参考来源列表")
+        jinfo(logger, "无引文，跳过参考文献章节", 节点="生成最终答复")
     
-    logger.info(f"【节点: finalize_answer】最终答案包含 {len(unique_sources)} 个数据源")
-    logger.info(f"【节点: finalize_answer】最终内容长度: {len(enhanced_content)} 字符")
-    logger.info(f"【节点: finalize_answer】节点执行完成")
+    jinfo(logger, "最终内容长度", 节点="生成最终答复", 长度=len(enhanced_content))
+    jinfo(logger, "最终答复生成完成", 节点="生成最终答复")
 
     return {
         "messages": [AIMessage(content=enhanced_content)],
@@ -1314,6 +1296,6 @@ _builder.add_edge("finalize_answer", END)
 
 graph = _builder.compile(name="enhanced-pro-search-engine")
 
-logger.info("【图构建完成】增强型 Pro Search Engine 已编译完成 (已加入研究方案步骤)")
+jinfo(logger, "搜索引擎图编译完成（已启用研究计划步骤）", 节点="图编译")
 
 
