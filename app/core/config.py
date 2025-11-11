@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # 博查搜索 API 配置
     BOCHA_API_KEY: Optional[str] = None
     
+    # 天眼查 API 配置
+    TIANYANCHA_API_TOKEN: Optional[str] = None
+    
     # Gemini API 配置
     GEMINI_API_URL: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
@@ -58,8 +61,8 @@ class Settings(BaseSettings):
     API_TIMEOUT: int = 600  # API 请求超时时间（秒），默认10分钟，用于 DeepSearch 等长时间任务
     
     # 深度网页抓取配置
-    WEB_SCRAPE_TOP_K: int = 5  # 深度抓取的网页数量
-    WEB_SCRAPE_CONCURRENCY: int = 5  # 并发抓取数量
+    WEB_SCRAPE_TOP_K: int = 8  # 深度抓取的网页数量
+    WEB_SCRAPE_CONCURRENCY: int = 8  # 并发抓取数量
     WEB_SCRAPE_TIMEOUT: int = 20  # 单个网页抓取超时时间（秒）
     WEB_SCRAPE_MAX_TOTAL_CHARS: int = 80000  # 所有抓取内容的总字符数上限
     WEB_SCRAPE_MAX_PER_DOC_CHARS: int = 20000  # 单个网页内容的字符数上限
