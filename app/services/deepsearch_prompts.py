@@ -43,34 +43,42 @@ research_plan_instructions = """你是一名专业的高级研究分析师。你
 {research_topic}"""
 
 
-query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
+query_writer_instructions = """你是一名专业的搜索查询生成专家。你的任务是生成高质量、多样化的网络搜索查询。这些查询将用于一个高级的自动化网络研究工具，该工具能够分析复杂结果、跟踪链接并综合信息。
+
+**重要：需要生成两套查询 - 英文查询用于实际搜索（提高搜索质量），中文查询用于前端展示。**
 
 **运行模式 (Operation Mode):**
 {mode_instruction}
 
 通用指令 (General Instructions):
-- Don't produce more than {number_queries} queries.
-- Query should ensure that the most current information is gathered. The current date is {current_date}.
+- 最多生成 {number_queries} 个查询。
+- 查询应确保收集最新信息。当前日期是 {current_date}。
+- **必须生成两套查询：**
+  - `query`: 英文搜索查询列表（用于实际网络搜索，确保搜索质量）
+  - `query_zh`: 中文搜索查询列表（用于前端展示给用户，与英文查询一一对应）
+- 两套查询的数量必须相同，且顺序一一对应（第1个中文查询对应第1个英文查询，以此类推）
 
 研究方案 (Research Plan):
 {research_plan}
 
-Format: 
-- Format your response as a JSON object with ALL two of these exact keys:
-   - "rationale": Brief explanation of why these queries are relevant
-   - "query": A list of search queries
+输出格式 (Format): 
+- 将你的回复格式化为 JSON 对象，包含以下三个键：
+   - "rationale": 简要说明为什么这些查询与研究主题相关（使用中文）
+   - "query": 英文搜索查询列表（用于实际搜索）
+   - "query_zh": 中文搜索查询列表（用于前端展示，与query顺序一一对应）
 
-Example:
+示例 (Example):
 
-Topic: What revenue grew more last year apple stock or the number of people buying an iphone
+主题：苹果公司去年的股票收益增长和 iPhone 购买人数增长哪个更多
 ```json
 {{
-    "rationale": "To answer this comparative growth question accurately, we need specific data points on Apple's stock performance and iPhone sales metrics. These queries target the precise financial information needed: company revenue trends, product-specific unit sales figures, and stock price movement over the same fiscal period for direct comparison.",
+    "rationale": "为了准确回答这个比较增长问题，我们需要苹果公司股票表现和 iPhone 销售指标的具体数据点。这些查询针对所需的精确财务信息：公司收入趋势、产品特定单位销售数据，以及同一财政期间的股价变动，以便直接比较。",
     "query": ["Apple total revenue growth fiscal year 2024", "iPhone unit sales growth fiscal year 2024", "Apple stock price growth fiscal year 2024"],
+    "query_zh": ["苹果公司2024财年总收入增长", "iPhone 2024财年销量增长", "苹果股票2024财年价格增长"]
 }}
 ```
 
-Context: {research_topic}"""
+研究主题 (Research Topic): {research_topic}"""
 
 
 web_searcher_instructions = """Conduct targeted Google Searches to gather the most recent, credible information on "{research_topic}" and synthesize it into a verifiable text artifact.

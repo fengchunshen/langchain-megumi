@@ -31,7 +31,8 @@ class ResearchPlan(BaseModel):
 
 
 class SearchQueryList(BaseModel):
-    query: List[str] = Field(description="A list of search queries to be used for web research.", alias="query")
+    query: List[str] = Field(description="A list of search queries to be used for web research (English queries for better search quality).", alias="query")
+    query_zh: List[str] = Field(description="A list of Chinese search queries for frontend display (same order as query field).", alias="query_zh")
     rationale: str = Field(description="A brief explanation of why these queries are relevant to the research topic.", alias="rationale")
     
     model_config = {

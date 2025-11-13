@@ -167,9 +167,8 @@ class ReportGenerator:
 
 **报告结束**
 
-*本报告由 Megumi AI Service 自动生成*  
 *系统版本: {metadata.get('system_version', '1.0.0')}*  
-*生成引擎: DeepSearch Pro*
+*生成引擎: FipeLine-M1*
 """
         
         return markdown

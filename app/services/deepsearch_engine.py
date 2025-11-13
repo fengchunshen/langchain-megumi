@@ -337,8 +337,9 @@ async def invoke_llm_with_fallback(
 class OverallState(TypedDict, total=False):
     messages: Annotated[List, add_messages]
     research_plan: Optional[ResearchPlan]
-    search_query: Annotated[List, operator.add]
-    new_search_query: List[str]  # 本轮新生成的查询（不累加）
+    search_query: Annotated[List, operator.add]  # 累积的查询（用于历史记录，存储中文查询用于前端展示）
+    new_search_query: List[str]  # 本轮新生成的英文查询（用于实际搜索，不累加）
+    new_search_query_zh: List[str]  # 本轮新生成的中文查询（用于前端展示，不累加）
     web_research_result: Annotated[List, operator.add]
     sources_gathered: Annotated[List, operator.add]
     all_sources_gathered: Annotated[List, operator.add]  # 所有搜索到的资源（包括未被引用的）
@@ -371,8 +372,9 @@ class Query(TypedDict):
 
 
 class QueryGenerationState(TypedDict):
-    search_query: List[str]  # 实际上是字符串列表，不是 Query 对象列表
-    new_search_query: List[str]  # 本轮新生成的查询（不累加）
+    search_query: List[str]  # 累积的查询（用于历史记录，存储中文查询用于前端展示）
+    new_search_query: List[str]  # 本轮新生成的英文查询（用于实际搜索，不累加）
+    new_search_query_zh: List[str]  # 本轮新生成的中文查询（用于前端展示，不累加）
 
 
 class WebSearchState(TypedDict):
@@ -527,13 +529,29 @@ async def generate_query(state: OverallState, config: RunnableConfig) -> QueryGe
     )
     check_cancellation_and_raise(connection_id)
     
-    query_count = len(result.query) if result.query else 0
-    jinfo(logger, "生成查询条数", 节点="生成查询", 数量=query_count)
-    for idx, query_item in enumerate(result.query[:5], 1):  # 只记录前5个
-        jinfo(logger, "查询样本", 节点="生成查询", 序号=idx, 查询=query_item[:100])
+    # 获取英文和中文查询
+    english_queries = result.query if result.query else []
+    chinese_queries = result.query_zh if result.query_zh else []
     
-    # 返回两个字段：search_query 用于累积（历史记录），new_search_query 用于本轮执行
-    return {"search_query": result.query, "new_search_query": result.query}
+    # 如果中文查询为空或数量不匹配，使用英文查询作为后备
+    if not chinese_queries or len(chinese_queries) != len(english_queries):
+        jwarn(logger, "中文查询缺失或不匹配，使用英文查询作为后备", 节点="生成查询", 英文数量=len(english_queries), 中文数量=len(chinese_queries))
+        chinese_queries = english_queries
+    
+    query_count = len(english_queries)
+    jinfo(logger, "生成查询条数", 节点="生成查询", 数量=query_count)
+    for idx, (en_query, zh_query) in enumerate(zip(english_queries[:5], chinese_queries[:5]), 1):  # 只记录前5个
+        jinfo(logger, "查询样本", 节点="生成查询", 序号=idx, 英文查询=en_query[:100], 中文查询=zh_query[:100])
+    
+    # 返回三个字段：
+    # - search_query: 累积的中文查询（用于前端展示和历史记录）
+    # - new_search_query: 英文查询（用于实际搜索）
+    # - new_search_query_zh: 中文查询（用于前端展示）
+    return {
+        "search_query": chinese_queries,  # 累积中文查询用于前端展示
+        "new_search_query": english_queries,  # 英文查询用于实际搜索
+        "new_search_query_zh": chinese_queries  # 中文查询用于前端展示
+    }
 
 
 def continue_to_web_research(state: QueryGenerationState):

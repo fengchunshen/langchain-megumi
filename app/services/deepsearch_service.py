@@ -212,8 +212,15 @@ class DeepSearchService:
                         yield self._create_progress_event("研究计划已制定", 1, 8, 12.5)
                     
                     elif node_name == "generate_query":
-                        if "search_query" in node_output:
+                        # 优先使用中文查询用于前端展示，如果没有则使用英文查询
+                        if "new_search_query_zh" in node_output:
+                            queries = node_output["new_search_query_zh"]
+                        elif "search_query" in node_output:
                             queries = node_output["search_query"]
+                        else:
+                            queries = []
+                        
+                        if queries:
                             yield self._create_event(
                                 DeepSearchEventType.QUERY_GENERATED,
                                 QueryGeneratedEventData(
