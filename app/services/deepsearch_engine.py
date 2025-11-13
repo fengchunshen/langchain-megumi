@@ -46,6 +46,7 @@ from .deepsearch_types import (
     RelevanceAssessment,
     SummaryOptimization,
     ResearchPlan,
+    StructuredFinding,
 )
 
 
@@ -1226,8 +1227,9 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
         if source["shortUrl"] in enhanced_content:
             enhanced_content = enhanced_content.replace(source["shortUrl"], source["value"])
     
-    citation_to_source = {}
+    citation_to_source: Dict[str, Dict[str, Any]] = {}
     unique_sources: List[Dict[str, Any]] = []
+    number_to_source_id: Dict[str, str] = {}
     
     def extract_citation_num(source: Dict[str, Any]) -> int:
         """从 shortUrl 中提取引用编号"""
@@ -1241,7 +1243,11 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     
     for idx, source in enumerate(sorted_sources, start=1):
         citation_num = str(idx)
+        source_id = source.get("id") or f"S{idx}"
+        source["id"] = source_id
+        source["citation_number"] = idx
         citation_to_source[citation_num] = source
+        number_to_source_id[citation_num] = source_id
         unique_sources.append(source)
     
     jinfo(logger, "来源去重后数量", 节点="生成最终答复", 数量=len(unique_sources))
@@ -1276,9 +1282,57 @@ async def finalize_answer(state: OverallState, config: RunnableConfig):
     jinfo(logger, "最终内容长度", 节点="生成最终答复", 长度=len(enhanced_content))
     jinfo(logger, "最终答复生成完成", 节点="生成最终答复")
 
+    structured_findings_payload: List[StructuredFinding] = []
+
+    def extract_structured_findings(raw_content: str) -> List[StructuredFinding]:
+        import re
+
+        reference_header_pattern = re.compile(r'\n##\s*[一二三四五六七八九十\d\.\s、-]*参考')
+        split_content = reference_header_pattern.split(raw_content, maxsplit=1)
+        main_body = split_content[0]
+
+        paragraphs = [segment.strip() for segment in main_body.split("\n\n") if segment.strip()]
+        number_pattern = re.compile(r'\[(\d+)\]')
+        marker_pattern = re.compile(r'CITATION\[(.*?)\]')
+
+        findings: List[StructuredFinding] = []
+
+        for paragraph in paragraphs:
+            if paragraph.startswith("#") or paragraph.startswith("---"):
+                continue
+            if paragraph.startswith("<p id="):
+                continue
+
+            marker_ids: List[str] = []
+            for marker in marker_pattern.findall(paragraph):
+                ids = [token.strip() for token in marker.split(",") if token.strip()]
+                marker_ids.extend(ids)
+
+            numbered_ids = [
+                number_to_source_id[number]
+                for number in number_pattern.findall(paragraph)
+                if number in number_to_source_id
+            ]
+
+            combined_ids = sorted({*marker_ids, *numbered_ids})
+            findings.append(
+                StructuredFinding(
+                    text=paragraph,
+                    source_ids=combined_ids,
+                )
+            )
+
+        return findings
+
+    structured_findings_payload = extract_structured_findings(enhanced_content)
+
     return {
         "messages": [AIMessage(content=enhanced_content)],
         "sources_gathered": unique_sources,
+        "structured_findings": [
+            finding.model_dump()
+            for finding in structured_findings_payload
+        ],
     }
 
 

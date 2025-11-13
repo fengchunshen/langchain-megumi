@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
 from pydantic import field_validator, FieldValidationInfo
 
@@ -130,6 +130,23 @@ class SummaryOptimization(BaseModel):
     
     model_config = {
         "populate_by_name": True,  # 允许使用字段名或别名
+    }
+
+
+class StructuredFinding(BaseModel):
+    """结构化的主要发现段落。"""
+    text: str = Field(description="段落正文（可以包含 CITATION[...] 占位符）")
+    source_ids: List[str] = Field(
+        default_factory=list,
+        description="段落直接引用的来源 ID 列表（如 S1、S2）"
+    )
+    topic: Optional[str] = Field(
+        default=None,
+        description="可选主题标签，用于对段落分组"
+    )
+
+    model_config = {
+        "populate_by_name": True,
     }
 
 

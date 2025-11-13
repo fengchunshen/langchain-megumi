@@ -425,6 +425,7 @@ class DeepSearchService:
                 query=request.query,
                 research_plan=result_state.get("research_plan"),
                 answer=answer_text,
+                structured_findings=result_state.get("structured_findings"),
                 sources=sources_gathered,
                 content_quality=result_state.get("content_quality", {}),
                 fact_verification=result_state.get("fact_verification", {}),
@@ -435,6 +436,7 @@ class DeepSearchService:
                     "number_of_queries": len(result_state.get("search_query", [])),
                     "number_of_sources": len(sources_gathered),
                     "total_sources_found": len(all_sources_gathered),
+                    "reasoning_model": request.reasoning_model or "自研数据研究模型",
                 }
             )
         else:

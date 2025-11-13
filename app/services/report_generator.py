@@ -1,9 +1,9 @@
 """研究报告生成器 - 生成规范的公文格式报告."""
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import logging
 
-from app.services.deepsearch_types import ResearchPlan
+from app.services.deepsearch_types import ResearchPlan, StructuredFinding
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ class ReportGenerator:
         query: str,
         research_plan: Optional[ResearchPlan],
         answer: str,
+        structured_findings: Optional[List[StructuredFinding]],
         sources: List[Dict[str, Any]],
         content_quality: Dict[str, Any],
         fact_verification: Dict[str, Any],
@@ -35,6 +36,7 @@ class ReportGenerator:
             query: 原始研究查询
             research_plan: 研究计划
             answer: 研究结论内容
+            structured_findings: 结构化的研究结论段落
             sources: 参考来源列表
             content_quality: 内容质量评估数据
             fact_verification: 事实验证数据
@@ -58,6 +60,18 @@ class ReportGenerator:
         # 构建报告标题
         research_topic = research_plan.research_topic if research_plan else query
         
+        # 预处理来源，生成稳定 ID -> 序号映射
+        normalized_sources, citation_registry = self._normalize_sources(sources)
+
+        parsed_findings: Optional[List[StructuredFinding]] = None
+        if structured_findings:
+            parsed_findings = [
+                finding
+                if isinstance(finding, StructuredFinding)
+                else StructuredFinding.model_validate(finding)
+                for finding in structured_findings
+            ]
+
         # 可选的“质量保障”章节（对外用户报告默认隐藏）
         quality_section = ""
         if include_quality_assurance:
@@ -78,44 +92,13 @@ class ReportGenerator:
 ---
 """
         
-        # 格式化主要发现，可能包含脚注定义
-        main_findings = self._format_main_findings(answer, sources)
-        
-        # 提取脚注定义
-        import re
-        footnote_pattern = re.compile(r'<!-- FOOTNOTES_START -->\n(.*?)\n<!-- FOOTNOTES_END -->', re.DOTALL)
-        footnote_match = footnote_pattern.search(main_findings)
-        footnotes_section = ""
-        
-        if footnote_match:
-            # 提取脚注定义
-            footnotes_text = footnote_match.group(1).strip()
-            # 从主要发现中移除脚注标记
-            main_findings = footnote_pattern.sub('', main_findings).strip()
-            # 格式化脚注部分（转换为 HTML 格式）
-            if footnotes_text:
-                # 将 Markdown 格式的脚注定义转换为 HTML 格式
-                import re
-                # 匹配 [^数字]: [标题](URL) 格式
-                md_footnote_pattern = re.compile(r'\[\^(\d+)\]:\s*\[([^\]]+)\]\(([^)]+)\)')
-                
-                def convert_to_html_footnote(match):
-                    num = match.group(1)
-                    title = match.group(2)
-                    url = match.group(3)
-                    return f'<p id="footnote-{num}"><sup>{num}</sup> <a href="{url}" target="_blank">{title}</a> <a href="#ref-{num}">↩</a></p>'
-                
-                # 转换所有 Markdown 脚注定义为 HTML 格式
-                html_footnotes = md_footnote_pattern.sub(convert_to_html_footnote, footnotes_text)
-                # 清理空行
-                footnotes_lines = [line.strip() for line in html_footnotes.split('\n') if line.strip()]
-                if footnotes_lines:
-                    formatted_footnotes = "\n".join(footnotes_lines)
-                    # 根据是否有质量保障章节决定脚注章节编号
-                    footnote_chapter = "六、脚注" if include_quality_assurance else "五、脚注"
-                    footnotes_section = f"\n\n## {footnote_chapter}\n\n{formatted_footnotes}\n"
-                else:
-                    footnotes_section = ""
+        # 格式化主要发现
+        main_findings = self._format_main_findings(
+            answer=answer,
+            structured_findings=parsed_findings,
+            sources=normalized_sources,
+            citation_registry=citation_registry
+        )
         
         markdown = f"""# {research_topic} 研究报告
 
@@ -186,11 +169,9 @@ class ReportGenerator:
 
 {quality_section}
 
-{footnotes_section}
-
 ## {"七、参考文献" if include_quality_assurance else "六、参考文献"}
 
-{self._format_references(sources)}
+{self._format_references(normalized_sources)}
 
 ---
 
@@ -211,76 +192,6 @@ class ReportGenerator:
 *系统版本: {metadata.get('system_version', '1.0.0')}*  
 *生成引擎: FipeLine-M1*
 """
-        
-        # 后处理：将报告中所有 ^[数字] 或 [^数字] 格式转换为 HTML sup 标签格式 <sup>数字</sup>
-        # 这样即使 LLM 直接生成了 ^[数字] 或 [^数字] 格式，也能被正确转换
-        import re
-        old_citation_pattern = re.compile(r'\^\[(\d+)\]')
-        markdown_citation_pattern = re.compile(r'\[\^(\d+)\]')
-        
-        def replace_to_sup(match):
-            num = match.group(1)
-            return f'<sup id="ref-{num}"><a href="#footnote-{num}">{num}</a></sup>'
-        
-        # 先替换 ^[数字] 格式
-        markdown = old_citation_pattern.sub(replace_to_sup, markdown)
-        # 再替换 [^数字] 格式
-        markdown = markdown_citation_pattern.sub(replace_to_sup, markdown)
-        
-        # 检查报告中使用的所有脚注编号，确保都有对应的脚注定义
-        used_footnote_nums = set(re.findall(r'<sup[^>]*>.*?(\d+).*?</sup>', markdown))
-        existing_footnote_nums = set(re.findall(r'id="footnote-(\d+)"', markdown))
-        
-        # 为缺失的脚注编号生成定义（使用 HTML 格式）
-        missing_footnotes = []
-        for num_str in sorted(used_footnote_nums, key=int):
-            if num_str not in existing_footnote_nums:
-                num = int(num_str)
-                if num <= len(sources):
-                    source = sources[num - 1]
-                    title = source.get("label", "未知来源")
-                    url = source.get("value", "#")
-                    # 使用 HTML 格式的脚注定义，支持跳转回引用位置
-                    missing_footnotes.append(f'<p id="footnote-{num}"><sup>{num}</sup> <a href="{url}" target="_blank">{title}</a> <a href="#ref-{num}">↩</a></p>')
-        
-        # 如果有缺失的脚注定义，添加到脚注部分
-        if missing_footnotes:
-            additional_footnotes = "\n".join(missing_footnotes)
-            # 查找脚注部分的位置（应该在参考文献之前）
-            if footnotes_section:
-                # 如果已有脚注部分，追加到其中
-                markdown = markdown.replace(
-                    footnotes_section,
-                    footnotes_section.rstrip() + "\n" + additional_footnotes + "\n"
-                )
-            else:
-                # 如果没有脚注部分，在参考文献之前添加（添加脚注标题）
-                # 根据是否有质量保障章节决定脚注和参考文献的章节编号
-                # 检查报告中是否有"五、质量保障"章节
-                has_quality_section = "## 五、质量保障" in markdown
-                footnote_chapter = "六、脚注" if has_quality_section else "五、脚注"
-                ref_chapter = "七、参考文献" if has_quality_section else "六、参考文献"
-                
-                # 匹配参考文献章节（可能是"六、参考文献"或"七、参考文献"）
-                ref_section_pattern = re.compile(r'(---\n\n)(## [六七]、参考文献)')
-                if ref_section_pattern.search(markdown):
-                    markdown = ref_section_pattern.sub(
-                        rf'\1## {footnote_chapter}\n\n{additional_footnotes}\n\n\2',
-                        markdown
-                    )
-                else:
-                    # 如果找不到分隔线，直接在参考文献标题前添加
-                    # 先尝试匹配"六、参考文献"
-                    if "## 六、参考文献" in markdown:
-                        markdown = markdown.replace(
-                            "## 六、参考文献",
-                            f"## {footnote_chapter}\n\n{additional_footnotes}\n\n## {ref_chapter}"
-                        )
-                    elif "## 七、参考文献" in markdown:
-                        markdown = markdown.replace(
-                            "## 七、参考文献",
-                            f"## {footnote_chapter}\n\n{additional_footnotes}\n\n## {ref_chapter}"
-                        )
         
         return markdown
     
@@ -342,40 +253,158 @@ class ReportGenerator:
         
         return questions_text.strip()
     
-    def _format_main_findings(self, answer: str, sources: Optional[List[Dict[str, Any]]] = None) -> str:
+    def _format_main_findings(
+        self,
+        answer: str,
+        structured_findings: Optional[List[StructuredFinding]],
+        sources: Optional[List[Dict[str, Any]]] = None,
+        citation_registry: Optional[Dict[str, int]] = None
+    ) -> str:
         """格式化主要发现."""
-        # 将答案分段处理
-        sections = answer.split("\n\n")
-        
         formatted = "### 3.1 核心发现\n\n"
         
-        # 主要内容
-        main_content = []
-        for section in sections:
-            if section.strip():
-                main_content.append(section.strip())
+        if structured_findings:
+            formatted += self._render_structured_findings(
+                findings=structured_findings,
+                citation_registry=citation_registry or {}
+            )
+            return formatted
         
-        content_text = "\n\n".join(main_content)
-        
-        # 如果提供了sources，使用新的角标格式
-        if sources:
-            formatted_content = self.format_content_with_citations(content_text, sources)
-            # 分离内容和脚注定义
-            # 脚注定义以 [^数字]: 开头（Markdown 格式，后续会转换为 HTML）
-            import re
-            footnote_pattern = re.compile(r'^\[\^\d+\]:.*$', re.MULTILINE)
-            footnotes = '\n'.join(footnote_pattern.findall(formatted_content))
-            # 移除脚注定义，只保留内容
-            content_with_citations = footnote_pattern.sub('', formatted_content).strip()
-            formatted += content_with_citations
-            # 返回格式化的内容和脚注（脚注将在报告末尾统一添加）
-            if footnotes:
-                # 将脚注存储为格式化字符串的一部分（通过特殊标记）
-                formatted += f"\n\n<!-- FOOTNOTES_START -->\n{footnotes}\n<!-- FOOTNOTES_END -->"
-        else:
-            formatted += content_text
+        # 回退到解析原始文本
+        formatted += self._render_fallback_answer(
+            answer=answer,
+            citation_registry=citation_registry or {}
+        )
         
         return formatted
+    
+    def _render_structured_findings(
+        self,
+        findings: List[StructuredFinding],
+        citation_registry: Dict[str, int]
+    ) -> str:
+        """渲染结构化主要发现."""
+        if not findings:
+            return ""
+        
+        citation_usage: Dict[str, int] = {}
+        rendered_sections: List[str] = []
+        current_topic: Optional[str] = None
+        
+        for idx, finding in enumerate(findings, 1):
+            text = (finding.text or "").strip()
+            if not text:
+                continue
+            
+            if finding.topic and finding.topic != current_topic:
+                current_topic = finding.topic
+                rendered_sections.append(f"**{current_topic}**")
+            
+            replaced_text = self._replace_citation_markers(
+                text=text,
+                citation_registry=citation_registry,
+                citation_usage=citation_usage,
+                fallback_ids=finding.source_ids
+            )
+            
+            rendered_sections.append(f"{idx}. {replaced_text.strip()}")
+        
+        return "\n\n".join(rendered_sections).strip()
+    
+    def _render_fallback_answer(
+        self,
+        answer: str,
+        citation_registry: Dict[str, int]
+    ) -> str:
+        """当缺少结构化数据时的回退渲染逻辑."""
+        sections = answer.split("\n\n")
+        main_content = [section.strip() for section in sections if section.strip()]
+        if not main_content:
+            return ""
+        
+        content_text = "\n\n".join(main_content)
+        return self.format_content_with_citations(content_text, citation_registry)
+    
+    def _replace_citation_markers(
+        self,
+        text: str,
+        citation_registry: Dict[str, int],
+        citation_usage: Dict[str, int],
+        fallback_ids: Optional[List[str]] = None
+    ) -> str:
+        """将文本中的 CITATION[...] 占位符替换为角标."""
+        import re
+        
+        marker_pattern = re.compile(r"CITATION\[(.*?)\]")
+        
+        def replace_match(match: re.Match) -> str:
+            ids = [
+                token.strip()
+                for token in match.group(1).split(",")
+                if token.strip()
+            ]
+            numbers = [
+                citation_registry[source_id]
+                for source_id in ids
+                if source_id in citation_registry
+            ]
+            if not numbers:
+                return ""
+            return self._build_superscript(numbers, citation_usage)
+        
+        replaced_text = marker_pattern.sub(replace_match, text)
+        
+        if "CITATION[" not in text and fallback_ids:
+            numbers = [
+                citation_registry[source_id]
+                for source_id in fallback_ids
+                if source_id in citation_registry
+            ]
+            if numbers:
+                replaced_text += self._build_superscript(numbers, citation_usage)
+        
+        return replaced_text
+    
+    def _build_superscript(
+        self,
+        numbers: List[int],
+        citation_usage: Dict[str, int]
+    ) -> str:
+        """根据引用序号生成角标 HTML."""
+        if not numbers:
+            return ""
+        
+        unique_numbers = sorted({str(number) for number in numbers}, key=int)
+        super_scripts = []
+        
+        for number in unique_numbers:
+            suffix = citation_usage.get(number, 0) + 1
+            citation_usage[number] = suffix
+            citation_id = f"cite-{number}-{suffix}"
+            reference_id = f"ref-{number}"
+            super_scripts.append(
+                f'<sup id="{citation_id}"><a href="#{reference_id}">[{number}]</a></sup>'
+            )
+        
+        return "".join(super_scripts)
+    
+    def _normalize_sources(
+        self,
+        sources: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """为来源生成稳定 ID 并建立映射."""
+        normalized_sources: List[Dict[str, Any]] = []
+        citation_registry: Dict[str, int] = {}
+        
+        for idx, source in enumerate(sources, 1):
+            source_id = source.get("id") or f"S{idx}"
+            normalized_source = dict(source)
+            normalized_source["id"] = source_id
+            normalized_source["citation_number"] = idx
+            normalized_sources.append(normalized_source)
+            citation_registry[source_id] = idx
+        
+        return normalized_sources, citation_registry
     
     def _format_key_insights(self, summary_optimization: Dict[str, Any]) -> str:
         """格式化关键洞察."""
@@ -443,8 +472,14 @@ class ReportGenerator:
         if verified_facts:
             for idx, fact in enumerate(verified_facts[:5], 1):  # 只显示前5个
                 if sources and idx <= len(sources):
-                    # 使用角标引用
-                    formatted += f"{idx}. {fact} ^{idx}\n"
+                    citation_id = f"cite-fact-{idx}"
+                    reference_id = f"ref-{idx}"
+                    citation_html = (
+                        f'<sup id="{citation_id}">'
+                        f'<a href="#{reference_id}">[{idx}]</a>'
+                        "</sup>"
+                    )
+                    formatted += f"{idx}. {fact} {citation_html}\n"
                 else:
                     # 传统的来源格式
                     source_idx = idx
@@ -508,13 +543,23 @@ class ReportGenerator:
         for idx, source in enumerate(sources, 1):
             title = source.get("label", "未知来源")
             url = source.get("value", "#")
+            reference_id = f"ref-{idx}"
             
-            # 格式化为标准的参考文献格式
-            formatted += f"[{idx}] {title}. 访问链接：{url}. 访问时间：{access_time}\n\n"
+            formatted += (
+                f'<p id="{reference_id}">'
+                f"[{idx}] "
+                f'<a href="{url}" target="_blank" rel="noopener noreferrer">{title}</a>'
+                f"。访问时间：{access_time}"
+                "</p>\n"
+            )
         
         return formatted.strip()
 
-    def format_content_with_citations(self, content: str, sources: List[Dict[str, Any]]) -> str:
+    def format_content_with_citations(
+        self,
+        content: str,
+        citation_registry: Optional[Dict[str, int]] = None
+    ) -> str:
         """
         在内容中添加角标超链接引用（使用 HTML sup 标签格式）.
         
@@ -525,64 +570,41 @@ class ReportGenerator:
         Returns:
             str: 包含角标引用的格式化内容
         """
-        if not sources:
-            return content
+        if not citation_registry:
+            citation_registry = {}
         
-        # 首先将内容中的 ^[数字] 或 [^数字] 格式转换为 HTML sup 标签格式
         import re
-        # 匹配 ^[数字] 格式
-        old_citation_pattern = re.compile(r'\^\[(\d+)\]')
-        # 匹配 [^数字] 格式
-        md_citation_pattern = re.compile(r'\[\^(\d+)\]')
         
-        def replace_to_sup(match):
-            num = match.group(1)
-            return f'<sup id="ref-{num}"><a href="#footnote-{num}">{num}</a></sup>'
+        # 替换可能存在的脚注格式为参考文献编号格式
+        content = re.sub(r'\^\[(\d+)\]', r'[\1]', content)
+        content = re.sub(r'\[\^(\d+)\]', r'[\1]', content)
         
-        # 替换所有 ^[数字] 为 <sup>数字</sup>
-        content = old_citation_pattern.sub(replace_to_sup, content)
-        # 替换所有 [^数字] 为 <sup>数字</sup>
-        content = md_citation_pattern.sub(replace_to_sup, content)
-        
-        # 按段落处理内容，在合适的位置插入角标（如果还没有引用）
         paragraphs = content.split('\n\n')
         formatted_paragraphs = []
-        citation_count = 0
+        citation_usage: Dict[str, int] = {}
         
-        for i, paragraph in enumerate(paragraphs):
-            if paragraph.strip():
-                # 检查段落中是否已有脚注引用（检查 sup 标签）
-                if not re.search(r'<sup[^>]*>.*?\d+.*?</sup>', paragraph):
-                    # 如果没有引用且还有可用的来源，添加引用
-                    if citation_count < len(sources):
-                        citation_count += 1
-                        citation = f'<sup id="ref-{citation_count}"><a href="#footnote-{citation_count}">{citation_count}</a></sup>'
-                        formatted_paragraphs.append(paragraph + citation)
-                    else:
-                        formatted_paragraphs.append(paragraph)
-                else:
-                    formatted_paragraphs.append(paragraph)
-            else:
+        for paragraph in paragraphs:
+            if not paragraph.strip():
                 formatted_paragraphs.append(paragraph)
+                continue
+            
+            # 如果段落中已存在编号，则替换为 HTML 角标形式
+            def replace_existing(match: re.Match) -> str:
+                number = match.group(1)
+                suffix = citation_usage.get(number, 0) + 1
+                citation_usage[number] = suffix
+                citation_id = f"cite-{number}-{suffix}"
+                reference_id = f"ref-{number}"
+                return (
+                    f'<sup id="{citation_id}">'
+                    f'<a href="#{reference_id}">[{number}]</a>'
+                    "</sup>"
+                )
+            
+            replaced_paragraph = re.sub(r'\[(\d+)\]', replace_existing, paragraph)
+            formatted_paragraphs.append(replaced_paragraph)
         
-        # 收集所有使用的脚注编号
-        used_footnotes = set(re.findall(r'<sup[^>]*>.*?(\d+).*?</sup>', '\n\n'.join(formatted_paragraphs)))
-        
-        # 添加脚注定义（使用 HTML 格式，兼容 Markdown 格式以便后续转换）
-        # 注意：脚注定义将在报告生成时统一添加到报告末尾，这里不直接添加
-        # 但为了兼容性，我们仍然返回包含脚注定义的内容（使用 Markdown 格式，后续会转换为 HTML）
-        footnotes = "\n\n"
-        for idx_str in sorted(used_footnotes, key=int):
-            idx = int(idx_str)
-            if idx <= len(sources):
-                source = sources[idx - 1]
-                title = source.get("label", "未知来源")
-                url = source.get("value", "#")
-                # 使用 Markdown 脚注定义格式（后续会转换为 HTML）
-                # 格式：[^数字]: [标题](URL)
-                footnotes += f"[^{idx}]: [{title}]({url})\n"
-        
-        return '\n\n'.join(formatted_paragraphs) + footnotes
+        return '\n\n'.join(formatted_paragraphs)
     
     def _format_research_statistics(self, metadata: Dict[str, Any]) -> str:
         """格式化研究统计数据."""
