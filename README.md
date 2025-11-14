@@ -1,6 +1,6 @@
-# LangChain-Megumi
+# deepResearch-FilpLine
 
-LangChain-Megumi是基于 LangGraph 状态图的多阶段自适应研究系统，通过迭代式信息检索与质量评估生成带引用的研究报告。
+deepResearch-FilpLine是基于 LangGraph 状态图的多阶段自适应研究系统，通过迭代式信息检索与质量评估生成带引用的研究报告。
 
 ## 技术栈
 
