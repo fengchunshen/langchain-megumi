@@ -2,6 +2,7 @@
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import logging
+import re
 
 from app.services.deepsearch_types import ResearchPlan, StructuredFinding
 
@@ -62,6 +63,7 @@ class ReportGenerator:
         
         # 预处理来源，生成稳定 ID -> 序号映射
         normalized_sources, citation_registry = self._normalize_sources(sources)
+        label_lookup = self._build_label_lookup(normalized_sources, citation_registry)
 
         parsed_findings: Optional[List[StructuredFinding]] = None
         if structured_findings:
@@ -97,21 +99,15 @@ class ReportGenerator:
             answer=answer,
             structured_findings=parsed_findings,
             sources=normalized_sources,
-            citation_registry=citation_registry
+            citation_registry=citation_registry,
+            label_lookup=label_lookup
         )
         
         markdown = f"""# {research_topic} 研究报告
 
 **报告编号**: DR-{report_date}-{report_id}  
 **生成时间**: {generation_time}  
-**研究模型**: {model_name}  
-**置信度等级**: {confidence_level}  
-
----
-
-## 报告摘要
-
-{self._generate_executive_summary(answer, summary_optimization)}
+**研究模型**: FilpLine-M1-preview-11-13
 
 ---
 
@@ -148,30 +144,6 @@ class ReportGenerator:
 ## 三、研究结论
 
 {main_findings}
-
----
-
-## 四、综合评估
-
-### 4.1 关键洞察
-
-基于本次研究，得出以下关键洞察：
-
-{self._format_key_insights(summary_optimization)}
-
-### 4.2 建议措施
-
-针对研究结论，提出以下建议：
-
-{self._format_recommendations(summary_optimization)}
-
----
-
-{quality_section}
-
-## {"七、参考文献" if include_quality_assurance else "六、参考文献"}
-
-{self._format_references(normalized_sources)}
 
 ---
 
@@ -258,7 +230,8 @@ class ReportGenerator:
         answer: str,
         structured_findings: Optional[List[StructuredFinding]],
         sources: Optional[List[Dict[str, Any]]] = None,
-        citation_registry: Optional[Dict[str, int]] = None
+        citation_registry: Optional[Dict[str, int]] = None,
+        label_lookup: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> str:
         """格式化主要发现."""
         formatted = "### 3.1 核心发现\n\n"
@@ -266,14 +239,16 @@ class ReportGenerator:
         if structured_findings:
             formatted += self._render_structured_findings(
                 findings=structured_findings,
-                citation_registry=citation_registry or {}
+                citation_registry=citation_registry or {},
+                label_lookup=label_lookup or {}
             )
             return formatted
         
         # 回退到解析原始文本
         formatted += self._render_fallback_answer(
             answer=answer,
-            citation_registry=citation_registry or {}
+            citation_registry=citation_registry or {},
+            label_lookup=label_lookup or {}
         )
         
         return formatted
@@ -281,7 +256,8 @@ class ReportGenerator:
     def _render_structured_findings(
         self,
         findings: List[StructuredFinding],
-        citation_registry: Dict[str, int]
+        citation_registry: Dict[str, int],
+        label_lookup: Dict[str, Dict[str, Any]]
     ) -> str:
         """渲染结构化主要发现."""
         if not findings:
@@ -304,7 +280,8 @@ class ReportGenerator:
                 text=text,
                 citation_registry=citation_registry,
                 citation_usage=citation_usage,
-                fallback_ids=finding.source_ids
+                fallback_ids=finding.source_ids,
+                label_lookup=label_lookup
             )
             
             rendered_sections.append(f"{idx}. {replaced_text.strip()}")
@@ -314,7 +291,8 @@ class ReportGenerator:
     def _render_fallback_answer(
         self,
         answer: str,
-        citation_registry: Dict[str, int]
+        citation_registry: Dict[str, int],
+        label_lookup: Dict[str, Dict[str, Any]]
     ) -> str:
         """当缺少结构化数据时的回退渲染逻辑."""
         sections = answer.split("\n\n")
@@ -323,18 +301,21 @@ class ReportGenerator:
             return ""
         
         content_text = "\n\n".join(main_content)
-        return self.format_content_with_citations(content_text, citation_registry)
+        return self.format_content_with_citations(
+            content_text,
+            citation_registry,
+            label_lookup=label_lookup
+        )
     
     def _replace_citation_markers(
         self,
         text: str,
         citation_registry: Dict[str, int],
         citation_usage: Dict[str, int],
-        fallback_ids: Optional[List[str]] = None
+        fallback_ids: Optional[List[str]] = None,
+        label_lookup: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> str:
         """将文本中的 CITATION[...] 占位符替换为角标."""
-        import re
-        
         marker_pattern = re.compile(r"CITATION\[(.*?)\]")
         
         def replace_match(match: re.Match) -> str:
@@ -353,6 +334,12 @@ class ReportGenerator:
             return self._build_superscript(numbers, citation_usage)
         
         replaced_text = marker_pattern.sub(replace_match, text)
+        replaced_text = self._link_unlinked_brackets(
+            replaced_text,
+            label_lookup or {},
+            citation_registry,
+            citation_usage
+        )
         
         if "CITATION[" not in text and fallback_ids:
             numbers = [
@@ -558,7 +545,8 @@ class ReportGenerator:
     def format_content_with_citations(
         self,
         content: str,
-        citation_registry: Optional[Dict[str, int]] = None
+        citation_registry: Optional[Dict[str, int]] = None,
+        label_lookup: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> str:
         """
         在内容中添加角标超链接引用（使用 HTML sup 标签格式）.
@@ -572,8 +560,6 @@ class ReportGenerator:
         """
         if not citation_registry:
             citation_registry = {}
-        
-        import re
         
         # 替换可能存在的脚注格式为参考文献编号格式
         content = re.sub(r'\^\[(\d+)\]', r'[\1]', content)
@@ -602,9 +588,124 @@ class ReportGenerator:
                 )
             
             replaced_paragraph = re.sub(r'\[(\d+)\]', replace_existing, paragraph)
+            replaced_paragraph = self._link_unlinked_brackets(
+                replaced_paragraph,
+                label_lookup or {},
+                citation_registry,
+                citation_usage
+            )
             formatted_paragraphs.append(replaced_paragraph)
         
         return '\n\n'.join(formatted_paragraphs)
+
+    def _build_label_lookup(
+        self,
+        sources: List[Dict[str, Any]],
+        citation_registry: Dict[str, int]
+    ) -> Dict[str, Dict[str, Any]]:
+        """构建基于来源标题的查找表，提升文本内引用解析能力."""
+        lookup: Dict[str, Dict[str, Any]] = {}
+        
+        for source in sources:
+            label = (source.get("label") or "").strip()
+            if not label:
+                continue
+            
+            citation_number = source.get("citation_number")
+            if not isinstance(citation_number, int):
+                continue
+            
+            source_id = source.get("id")
+            if not source_id:
+                continue
+            
+            url = source.get("value", "#")
+            base_info = {
+                "label": label,
+                "url": url,
+                "source_id": source_id,
+                "number": citation_number
+            }
+            
+            aliases = self._generate_label_aliases(label)
+            for alias in aliases:
+                sanitized = self._sanitize_label(alias)
+                if not sanitized or sanitized in lookup:
+                    continue
+                lookup[sanitized] = base_info
+        
+        return lookup
+
+    def _generate_label_aliases(self, label: str) -> List[str]:
+        """生成标题的多种别名（分隔符拆分 + 截断）."""
+        aliases = {label}
+        separators = ["：", ":", "-", "—", "|", "——"]
+        
+        for separator in separators:
+            if separator in label:
+                primary = label.split(separator)[0].strip()
+                if primary:
+                    aliases.add(primary)
+        
+        # 生成不同长度的前缀，便于匹配截断标题
+        for length in (96, 72, 64, 56, 48, 40, 32):
+            if len(label) > length:
+                aliases.add(label[:length])
+        
+        return [alias for alias in aliases if alias]
+
+    def _sanitize_label(self, value: str) -> str:
+        """标准化标题文本，便于匹配."""
+        normalized = re.sub(r'[\s\-\—\|\：\:]+', ' ', value.lower()).strip()
+        normalized = re.sub(r'[^a-z0-9\u4e00-\u9fff ]', '', normalized)
+        return normalized.replace(" ", "")
+
+    def _link_unlinked_brackets(
+        self,
+        text: str,
+        label_lookup: Dict[str, Dict[str, Any]],
+        citation_registry: Dict[str, int],
+        citation_usage: Dict[str, int]
+    ) -> str:
+        """识别未成链接的 [标题]，补充为可点击引用并追加角标."""
+        if not label_lookup or not text:
+            return text
+        
+        pattern = re.compile(r'(?<!\!)\[(?P<label>[^\[\]\n]{3,120})\](?!\()')
+        
+        def replacer(match: re.Match) -> str:
+            raw_label = match.group("label").strip()
+            if not raw_label or raw_label.isdigit():
+                return match.group(0)
+            
+            sanitized = self._sanitize_label(raw_label)
+            if not sanitized:
+                return match.group(0)
+            
+            source_info = label_lookup.get(sanitized)
+            if not source_info:
+                # 兼容被截断的标题，尝试进行前缀/后缀匹配
+                for key, info in label_lookup.items():
+                    if sanitized.startswith(key) or key.startswith(sanitized):
+                        source_info = info
+                        break
+            if not source_info:
+                return match.group(0)
+            
+            url = source_info.get("url", "#")
+            number = source_info.get("number")
+            
+            link = (
+                f'<a href="{url}" target="_blank" rel="noopener noreferrer">{raw_label}</a>'
+            )
+            
+            superscript = ""
+            if isinstance(number, int) and number in citation_registry.values():
+                superscript = self._build_superscript([number], citation_usage)
+            
+            return f"{link}{superscript}"
+        
+        return pattern.sub(replacer, text)
     
     def _format_research_statistics(self, metadata: Dict[str, Any]) -> str:
         """格式化研究统计数据."""
