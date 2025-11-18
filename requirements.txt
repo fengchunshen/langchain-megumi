@@ -30,6 +30,10 @@ beautifulsoup4>=4.12.0
 lxml>=4.9.0
 readability-lxml>=0.8.0
 
+# Excel处理
+pandas>=2.0.0
+openpyxl>=3.1.0
+
 # 其他工具
 python-dotenv>=1.0.1
 typing-extensions>=4.9.0  # 类型扩展，支持更现代的 Python 类型注解

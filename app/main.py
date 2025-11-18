@@ -17,7 +17,8 @@ from app.apis.v1 import (
     endpoint_agent,
     endpoint_analysis,
     endpoint_deepsearch,
-    endpoint_monitor
+    endpoint_monitor,
+    endpoint_tianyancha
 )
 import logging
 
@@ -89,6 +90,13 @@ app.include_router(
     endpoint_monitor.router,
     prefix=f"{settings.API_V1_PREFIX}/monitor",
     tags=["系统监控"]
+)
+
+# 注册天眼查路由
+app.include_router(
+    endpoint_tianyancha.router,
+    prefix=f"{settings.API_V1_PREFIX}/tianyancha",
+    tags=["天眼查"]
 )
 
 
