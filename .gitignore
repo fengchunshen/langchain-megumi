@@ -33,9 +33,11 @@ ENV/
 *.swo
 *~
 
-# 环境变量
+# 环境变量（确保敏感信息不会被提交）
 .env
 .env.local
+.env.production
+.env.*.local
 
 # 日志
 *.log

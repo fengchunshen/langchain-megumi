@@ -75,21 +75,62 @@ app/
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：自动配置（推荐）
+
+使用快速配置脚本自动生成安全配置：
+
+```powershell
+# 运行配置向导
+.\scripts\quick_setup.ps1
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 启动服务
+python -m app.main
+```
+
+### 方式二：手动配置
+
+#### 1. 安装依赖
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+#### 2. 配置环境变量
 
 复制 `.env.example` 为 `.env` 并填写相关配置：
 
 ```powershell
-copy .env.example .env
+Copy-Item .env.example .env
 ```
 
-### 3. 运行服务
+**关键配置项（生产环境必须修改）**：
+
+```ini
+# 禁用 DEBUG 模式
+DEBUG=false
+
+# 设置 CORS 允许的域名（替换为您的实际域名）
+ALLOW_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+
+# 生成并设置强随机 API Key
+# PowerShell: [guid]::NewGuid().ToString("N")
+RUOYI_API_KEY=生成的随机密钥
+```
+
+#### 3. 安全配置检查
+
+```powershell
+# 运行安全检查
+python scripts/security_check.py
+
+# 运行依赖扫描
+.\scripts\audit_dependencies.ps1
+```
+
+#### 4. 运行服务
 
 ```powershell
 python -m app.main
@@ -101,10 +142,13 @@ python -m app.main
 uvicorn app.main:app --reload
 ```
 
-### 4. 访问 API 文档
+#### 5. 访问 API 文档
 
-- Swagger UI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
+- **开发环境** (DEBUG=true):
+  - Swagger UI: http://localhost:8000/docs
+  - ReDoc: http://localhost:8000/redoc
+- **生产环境** (DEBUG=false):
+  - API 文档已禁用（安全考虑）
 
 ## Docker 部署
 
@@ -215,13 +259,63 @@ DeepSearch 是基于 LangGraph 状态图的多阶段自适应研究系统，通�
 
 ## 环境配置
 
-```bash
+### 必需配置
+
+```ini
+# 应用基础配置
+DEBUG=false  # 生产环境必须设置为 false
+ALLOW_ORIGINS=https://yourdomain.com  # CORS 白名单
+RUOYI_API_KEY=your_secure_api_key  # API 认证密钥
+
+# AI 模型配置（至少配置一个）
 GEMINI_API_KEY=your_gemini_key
 GEMINI_API_URL=https://generativelanguage.googleapis.com/v1
-BOCHA_API_KEY=your_bocha_key  # 用于网络搜索
-DASHSCOPE_API_KEY=your_dashscope_key  # 降级备用
+
+# 搜索服务（DeepSearch 必需）
+BOCHA_API_KEY=your_bocha_key
+
+# 备用模型（可选，用于降级）
+DASHSCOPE_API_KEY=your_dashscope_key
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
+
+### 可选配置
+
+```ini
+# 其他 AI 服务
+OPENAI_API_KEY=your_openai_key
+FASTGPT_API_KEY=your_fastgpt_key
+TIANYANCHA_API_TOKEN=your_tianyancha_token
+```
+
+完整配置请参考 `.env.example`。
+
+## 安全配置
+
+本项目已实施完整的安全加固措施，满足安全漏扫要求。
+
+### 安全特性
+
+- ✅ CORS 跨域限制（生产环境必须配置具体域名）
+- ✅ 安全响应头（X-Frame-Options, X-Content-Type-Options 等）
+- ✅ API 文档访问控制（生产环境自动禁用）
+- ✅ 强制 API Key 认证
+- ✅ 敏感信息保护（.gitignore 配置）
+
+### 部署前检查
+
+```powershell
+# 1. 安全配置检查
+python scripts/security_check.py
+
+# 2. 依赖漏洞扫描
+.\scripts\audit_dependencies.ps1
+```
+
+详细安全配置指南请查看：
+- 📖 [安全配置文档](SECURITY.md)
+- 📋 [部署检查清单](部署安全检查清单.md)
+- 📝 [安全修复总结](安全漏扫修复总结.md)
 
 ## 开发规范
 

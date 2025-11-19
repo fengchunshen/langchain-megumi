@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # RuoYi 后端认证配置
     RUOYI_API_KEY: Optional[str] = None  # 用于验证来自 RuoYi 的请求
     
+    # CORS 配置
+    ALLOW_ORIGINS: str = "*"  # 允许的域名列表，用逗号分隔，如 "https://example.com,https://app.example.com"
+    
     # 其他配置
     TIMEOUT: int = 30  # 请求超时时间（秒）
     MAX_RETRIES: int = 3  # 最大重试次数

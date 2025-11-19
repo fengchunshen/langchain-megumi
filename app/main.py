@@ -30,23 +30,46 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 创建 FastAPI 应用实例
+# 创建 FastAPI 应用实例（生产环境禁用 API 文档，防止信息泄露）
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="Megumi AI Servive - FastAPI + LangChain 集成服务",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None
 )
 
-# 配置 CORS
+# 配置 CORS（安全漏扫要求：生产环境必须限制具体域名）
+origins = []
+if settings.ALLOW_ORIGINS and settings.ALLOW_ORIGINS != "*":
+    origins = [origin.strip() for origin in settings.ALLOW_ORIGINS.split(",")]
+elif settings.DEBUG:
+    # 开发环境允许所有来源
+    origins = ["*"]
+else:
+    # 生产环境如果配置为 "*"，则不允许任何来源（安全考虑）
+    origins = []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应限制具体域名
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 添加安全响应头中间件（安全漏扫要求）
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """添加安全响应头."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    # 如果启用了 HTTPS，建议启用 HSTS
+    if not settings.DEBUG:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 # 注册 API 路由
 app.include_router(
