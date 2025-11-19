@@ -1,0 +1,18 @@
+.drawing-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.images-section {
+  margin-top: 24px;
+}
+
+.image-item {
+  text-align: center;
+}
+
+.image-item img {
+  width: 100%;
+  border-radius: 4px;
+}
+

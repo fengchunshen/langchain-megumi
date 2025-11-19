@@ -1,0 +1,31 @@
+.app-store {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.app-store-header {
+  margin-bottom: 24px;
+}
+
+.app-store-header h2 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.app-store-header p {
+  color: #666;
+  font-size: 14px;
+}
+
+.app-store-filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.app-store-content {
+  min-height: 400px;
+}
+

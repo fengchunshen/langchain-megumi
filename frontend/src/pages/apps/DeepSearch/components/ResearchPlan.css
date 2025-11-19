@@ -1,0 +1,68 @@
+.research-plan-card {
+  background: #f8faff;
+  border: 1px solid #e6f4ff;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+}
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e6f4ff;
+}
+
+.plan-icon {
+  font-size: 20px;
+}
+
+.plan-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.plan-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1677ff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.section-body {
+  font-size: 14px;
+  color: #1f1f1f;
+  line-height: 1.6;
+}
+
+.plan-item {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.plan-item:last-child {
+  margin-bottom: 0;
+}
+
+.item-index {
+  color: #8c8c8c;
+  font-family: monospace;
+  min-width: 20px;
+}
+
+.item-text {
+  flex: 1;
+}
+

@@ -1,0 +1,20 @@
+.tianyancha-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.upload-section {
+  margin-bottom: 24px;
+}
+
+.result-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.download-section {
+  margin-top: 24px;
+}
+

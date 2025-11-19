@@ -1,0 +1,25 @@
+.analysis-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.result-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.json-result {
+  background: #fff;
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.tags-section {
+  margin-top: 16px;
+}
+

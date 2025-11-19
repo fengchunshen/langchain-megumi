@@ -1,0 +1,37 @@
+.agent-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.result-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.sources-section,
+.metadata-section {
+  margin-top: 16px;
+}
+
+.sources-section ul {
+  list-style: none;
+  padding: 0;
+}
+
+.sources-section li {
+  margin-bottom: 8px;
+}
+
+.sources-section a {
+  color: #1890ff;
+}
+
+.metadata-section pre {
+  background: #fff;
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+

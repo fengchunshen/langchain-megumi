@@ -1,0 +1,151 @@
+.deepsearch-page {
+  height: 100%;
+  background: #ffffff;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.deepsearch-bg {
+  height: 60px;
+  background: #ffffff;
+  border-bottom: 1px solid #f0f0f0;
+  z-index: 0;
+  flex-shrink: 0;
+}
+
+.main-content {
+  flex: 1;
+  padding: 20px 40px 10px 40px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 左右布局容器 */
+.content-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 32px;
+  width: 100%;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 左侧：对话区域 */
+.left-section {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden; /* 防止溢出 */
+  min-height: 0; /* 重要：允许 flex 子元素正确缩小 */
+}
+
+.left-section.has-result {
+  flex: 0 0 48%;
+  max-width: 48%;
+}
+
+.left-scroll-container {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  /* 美化滚动条 */
+  scrollbar-width: thin;
+  padding-bottom: 180px; /* 防止内容被底部输入框遮挡 */
+}
+
+.left-scroll-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.left-scroll-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.left-scroll-container::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
+}
+
+.left-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.left-plan-container {
+  flex-shrink: 0;
+  padding: 16px 16px 0 16px;
+}
+
+/* 右侧：Result 区域 */
+.right-section {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 50%;
+  max-width: 50%;
+  overflow-y: auto;
+  animation: slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 美化右侧滚动条 */
+.right-section::-webkit-scrollbar {
+  width: 6px;
+}
+
+.right-section::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.right-section::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
+}
+
+.right-section::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* 响应式布局 */
+@media (max-width: 768px) {
+  .main-content {
+    padding: 16px;
+  }
+
+  .content-layout {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .left-section.has-result,
+  .right-section {
+    flex: 1;
+    max-width: 100%;
+  }
+
+  .left-section {
+    height: 60vh;
+  }
+
+  .right-section {
+    flex: none !important;
+    height: auto;
+    min-height: 40vh;
+  }
+}
